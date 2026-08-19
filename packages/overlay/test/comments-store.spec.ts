@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { createPinia, setActivePinia } from 'pinia'
 import { setBackend } from '../src/lib/backend'
-import type { C11nBackend, CommentRec } from '../src/lib/api'
+import type { C11nBackend, CommentRec, ReplyRec } from '../src/lib/api'
 import type { Anchor } from '../src/lib/anchor'
 import { PROJECT } from '../src/lib/project'
 import { useCommentsStore } from '../src/stores/comments'
@@ -261,6 +261,154 @@ describe('useCommentsStore', () => {
 
       store.removeFromRealtime('c1')
       expect(store.items).toHaveLength(0)
+    })
+  })
+
+  describe('thread state', () => {
+    it('openThread/closeThread set and clear activeCommentId', () => {
+      setBackend(makeMockBackend())
+      const store = useCommentsStore()
+      expect(store.activeCommentId).toBeNull()
+
+      store.openThread('c1')
+      expect(store.activeCommentId).toBe('c1')
+
+      store.closeThread()
+      expect(store.activeCommentId).toBeNull()
+    })
+  })
+
+  describe('loadReplies', () => {
+    function replyRec(overrides: Partial<ReplyRec> = {}): ReplyRec {
+      return {
+        id: 'r1',
+        comment: 'c1',
+        body: 'Agreed',
+        author: 'u2',
+        authorName: 'Ana',
+        created: '2026-08-19 10:05:00',
+        ...overrides,
+      }
+    }
+
+    it('fetches once and caches per comment', async () => {
+      const listReplies = vi.fn().mockResolvedValue([replyRec()])
+      setBackend(makeMockBackend({ listReplies }))
+      const store = useCommentsStore()
+
+      await store.loadReplies('c1')
+      await store.loadReplies('c1')
+
+      expect(listReplies).toHaveBeenCalledTimes(1)
+      expect(listReplies).toHaveBeenCalledWith('c1')
+      expect(store.replies.get('c1')).toEqual([replyRec()])
+    })
+
+    it('caches independently per comment id', async () => {
+      const listReplies = vi
+        .fn()
+        .mockResolvedValueOnce([replyRec()])
+        .mockResolvedValueOnce([replyRec({ id: 'r9', comment: 'c2' })])
+      setBackend(makeMockBackend({ listReplies }))
+      const store = useCommentsStore()
+
+      await store.loadReplies('c1')
+      await store.loadReplies('c2')
+
+      expect(listReplies).toHaveBeenCalledTimes(2)
+      expect(store.replies.get('c2')![0].id).toBe('r9')
+    })
+
+    it('addReply persists through the backend and appends to the cache', async () => {
+      const created = replyRec({ id: 'r2', body: 'New reply' })
+      const mock = makeMockBackend({
+        listReplies: vi.fn().mockResolvedValue([replyRec()]),
+        createReply: vi.fn().mockResolvedValue(created),
+      })
+      setBackend(mock)
+      const store = useCommentsStore()
+      await store.loadReplies('c1')
+
+      await store.addReply('c1', 'New reply')
+
+      expect(mock.createReply).toHaveBeenCalledWith('c1', 'New reply')
+      expect(store.replies.get('c1')!.map((r) => r.id)).toEqual(['r1', 'r2'])
+      expect(store.loading).toBe(false)
+      expect(store.error).toBeNull()
+    })
+
+    it('addReply creates the cache entry when replies were never loaded', async () => {
+      const created = replyRec({ id: 'r2' })
+      setBackend(makeMockBackend({ createReply: vi.fn().mockResolvedValue(created) }))
+      const store = useCommentsStore()
+
+      await store.addReply('c1', 'first!')
+
+      expect(store.replies.get('c1')).toEqual([created])
+    })
+
+    it('addReply failure sets error and leaves the cache untouched', async () => {
+      setBackend(
+        makeMockBackend({
+          listReplies: vi.fn().mockResolvedValue([replyRec()]),
+          createReply: vi.fn().mockRejectedValue(new Error('nope')),
+        }),
+      )
+      const store = useCommentsStore()
+      await store.loadReplies('c1')
+
+      await store.addReply('c1', 'doomed')
+
+      expect(store.error).toBe('Could not save reply')
+      expect(store.replies.get('c1')).toHaveLength(1)
+      expect(store.loading).toBe(false)
+    })
+  })
+
+  describe('resolve', () => {
+    it('marks the item resolved in place via backend.setResolved(id, true)', async () => {
+      const mock = makeMockBackend({
+        listComments: vi.fn().mockResolvedValue([rec({ id: 'c1' }), rec({ id: 'c2' })]),
+      })
+      setBackend(mock)
+      const store = useCommentsStore()
+      await store.setPath('/pricing')
+
+      await store.resolve('c1')
+
+      expect(mock.setResolved).toHaveBeenCalledWith('c1', true)
+      expect(store.items.find((c) => c.id === 'c1')!.resolved).toBe(true)
+      expect(store.items.find((c) => c.id === 'c2')!.resolved).toBe(false)
+      expect(store.unresolvedForCurrentPath.map((c) => c.id)).toEqual(['c2'])
+    })
+
+    it('closes the thread when the resolved comment was active', async () => {
+      setBackend(makeMockBackend({ listComments: vi.fn().mockResolvedValue([rec()]) }))
+      const store = useCommentsStore()
+      await store.setPath('/pricing')
+      store.openThread('c1')
+
+      await store.resolve('c1')
+
+      expect(store.activeCommentId).toBeNull()
+    })
+
+    it('failure sets error and leaves the item unresolved', async () => {
+      setBackend(
+        makeMockBackend({
+          listComments: vi.fn().mockResolvedValue([rec()]),
+          setResolved: vi.fn().mockRejectedValue(new Error('nope')),
+        }),
+      )
+      const store = useCommentsStore()
+      await store.setPath('/pricing')
+      store.openThread('c1')
+
+      await store.resolve('c1')
+
+      expect(store.error).toBe('Could not resolve comment')
+      expect(store.items[0].resolved).toBe(false)
+      expect(store.activeCommentId).toBe('c1')
     })
   })
 })

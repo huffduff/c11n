@@ -6,6 +6,8 @@ import { onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import LoginPanel from './components/LoginPanel.vue'
 import Toolbar from './components/Toolbar.vue'
 import Composer from './components/Composer.vue'
+import PinLayer from './components/PinLayer.vue'
+import ThreadPopover from './components/ThreadPopover.vue'
 import { useSessionStore } from './stores/session'
 import { useCommentsStore } from './stores/comments'
 import { createAnchor } from './lib/anchor'
@@ -68,8 +70,16 @@ onBeforeUnmount(() => {
 
 <template>
   <template v-if="session.isAuthed">
+    <!-- Pins live in the shadow root, so the picker's #c11n-root filter
+         already keeps pick-mode clicks and pin clicks from fighting. -->
+    <PinLayer />
     <Toolbar />
     <Composer v-if="comments.pendingAnchor" />
+    <!-- Keyed so switching threads remounts (fresh replies load + position). -->
+    <ThreadPopover
+      v-if="comments.activeCommentId"
+      :key="comments.activeCommentId"
+    />
   </template>
   <template v-else>
     <button

@@ -31,6 +31,35 @@ type AnyRecord = { [key: string]: any }
 export function createPocketBaseBackend(baseUrl = '/__c11n/pb'): C11nBackend {
   const pb = new PocketBase(baseUrl)
 
+  // The overlay deals in project *slugs* (`window.__C11N_PROJECT` → 'default'),
+  // but PocketBase stores `comments.project` as a relation holding the project
+  // *record id* — sending the slug fails validation (missing_rel_records).
+  // Resolve slug → id lazily, once per slug, so the C11nBackend interface stays
+  // slug-based (a future Go backend can accept slugs natively) and only this
+  // implementation translates at the edge.
+  const projectIdBySlug = new Map<string, Promise<string>>()
+  const slugById = new Map<string, string>()
+
+  function resolveProjectId(slug: string): Promise<string> {
+    let pending = projectIdBySlug.get(slug)
+    if (!pending) {
+      pending = pb
+        .collection('projects')
+        .getFirstListItem(pb.filter('slug = {:slug}', { slug }))
+        .then((rec: AnyRecord) => {
+          slugById.set(rec.id, slug)
+          return rec.id as string
+        })
+        .catch((err: unknown) => {
+          // Don't cache failures (e.g. lookup before login) — retry next call.
+          projectIdBySlug.delete(slug)
+          throw err
+        })
+      projectIdBySlug.set(slug, pending)
+    }
+    return pending
+  }
+
   function mapMe(r: AnyRecord): Me {
     return { id: r.id, email: r.email, name: r.name || r.email }
   }
@@ -57,7 +86,9 @@ export function createPocketBaseBackend(baseUrl = '/__c11n/pb'): C11nBackend {
   function mapComment(r: AnyRecord): CommentRec {
     return {
       id: r.id,
-      project: r.project,
+      // Stored as a record id; surface the slug the overlay knows when we
+      // have it (resolved earlier in this session), else pass through as-is.
+      project: slugById.get(r.project) ?? r.project,
       path: r.path,
       selector: r.selector,
       anchorMeta: parseAnchorMeta(r.anchorMeta),
@@ -106,11 +137,12 @@ export function createPocketBaseBackend(baseUrl = '/__c11n/pb'): C11nBackend {
     },
 
     async listComments(project, path) {
+      const projectId = await resolveProjectId(project)
       // Path omitted → project-wide list (sidebar); provided → per-page load.
       const filter =
         path === undefined
-          ? pb.filter('project = {:project}', { project })
-          : pb.filter('project = {:project} && path = {:path}', { project, path })
+          ? pb.filter('project = {:projectId}', { projectId })
+          : pb.filter('project = {:projectId} && path = {:path}', { projectId, path })
       const records = await pb.collection('comments').getFullList({
         filter,
         sort: 'created',
@@ -121,7 +153,10 @@ export function createPocketBaseBackend(baseUrl = '/__c11n/pb'): C11nBackend {
 
     async createComment(input) {
       const me = requireAuth()
-      const rec = await pb.collection('comments').create({ ...input, author: me.id })
+      const projectId = await resolveProjectId(input.project)
+      const rec = await pb
+        .collection('comments')
+        .create({ ...input, project: projectId, author: me.id })
       return mapComment(rec)
     },
 
@@ -149,15 +184,10 @@ export function createPocketBaseBackend(baseUrl = '/__c11n/pb'): C11nBackend {
     },
 
     subscribe(project, handlers) {
-      const onComment = (e: { action: string; record: AnyRecord }) => {
-        // Server-side filter already scopes to the project; keep a client-side
-        // guard as belt-and-braces (and for backends without realtime filters).
-        if (e.record.project !== project) return
-        const rec = mapComment(e.record)
-        if (e.action === 'create') handlers.onCommentCreate?.(rec)
-        else if (e.action === 'update') handlers.onCommentUpdate?.(rec)
-        else if (e.action === 'delete') handlers.onCommentDelete?.(rec)
-      }
+      // Setup is async (slug → id lookup) but the interface returns a sync
+      // unsubscribe; the cancelled flag closes the race where the caller
+      // unsubscribes before the lookup lands.
+      let cancelled = false
 
       // Replies carry no project field, so they can't be scoped without a
       // per-event lookup; subscribe to all and pass through. Consumers hold
@@ -171,14 +201,33 @@ export function createPocketBaseBackend(baseUrl = '/__c11n/pb'): C11nBackend {
 
       // subscribe() returns a promise; realtime setup failures shouldn't
       // crash the overlay, so log-and-continue.
-      pb.collection('comments')
-        .subscribe('*', onComment, { filter: pb.filter('project = {:project}', { project }) })
-        .catch((err) => console.warn('c11n: comments subscribe failed', err))
-      pb.collection('replies')
-        .subscribe('*', onReply)
-        .catch((err) => console.warn('c11n: replies subscribe failed', err))
+      resolveProjectId(project)
+        .then((projectId) => {
+          if (cancelled) return
+
+          const onComment = (e: { action: string; record: AnyRecord }) => {
+            // Server-side filter already scopes to the project; keep a client-
+            // side guard as belt-and-braces (records store the project id).
+            if (e.record.project !== projectId) return
+            const rec = mapComment(e.record)
+            if (e.action === 'create') handlers.onCommentCreate?.(rec)
+            else if (e.action === 'update') handlers.onCommentUpdate?.(rec)
+            else if (e.action === 'delete') handlers.onCommentDelete?.(rec)
+          }
+
+          pb.collection('comments')
+            .subscribe('*', onComment, {
+              filter: pb.filter('project = {:projectId}', { projectId }),
+            })
+            .catch((err) => console.warn('c11n: comments subscribe failed', err))
+          pb.collection('replies')
+            .subscribe('*', onReply)
+            .catch((err) => console.warn('c11n: replies subscribe failed', err))
+        })
+        .catch((err) => console.warn('c11n: project lookup failed, realtime disabled', err))
 
       return () => {
+        cancelled = true
         pb.collection('comments').unsubscribe('*')
           .catch(() => { /* already disconnected */ })
         pb.collection('replies').unsubscribe('*')

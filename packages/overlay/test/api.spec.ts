@@ -17,6 +17,7 @@ const h = vi.hoisted(() => {
     return {
       authWithPassword: vi.fn(),
       getFullList: vi.fn().mockResolvedValue([]),
+      getFirstListItem: vi.fn(),
       create: vi.fn(),
       update: vi.fn().mockResolvedValue({}),
       subscribe: vi.fn().mockResolvedValue(undefined),
@@ -61,8 +62,14 @@ import type { C11nBackend } from '../src/lib/api'
 function setup(baseUrl?: string) {
   const backend = baseUrl ? createPocketBaseBackend(baseUrl) : createPocketBaseBackend()
   const pb = h.state.instances[h.state.instances.length - 1]
+  // The PB impl resolves project slugs to record ids via the projects
+  // collection; give every test a default 'proj1' → 'pid1' mapping.
+  pb.collection('projects').getFirstListItem.mockResolvedValue({ id: 'pid1', slug: 'proj1' })
   return { backend: backend as C11nBackend, pb }
 }
+
+/** Drain pending microtasks/timers so async subscribe setup completes. */
+const flushAsync = () => new Promise((resolve) => setTimeout(resolve, 0))
 
 const userRecord = { id: 'u1', email: 'alice@example.com', name: 'Alice' }
 
@@ -131,15 +138,40 @@ describe('login / logout / me', () => {
 })
 
 describe('listComments', () => {
-  it('queries with a parameterized project+path filter, sorted, expanding author', async () => {
+  it('resolves the project slug to a record id for the filter (relation field)', async () => {
     const { backend, pb } = setup()
     await backend.listComments('proj1', '/pricing')
 
+    expect(pb.collection('projects').getFirstListItem).toHaveBeenCalledWith('slug = "proj1"')
     expect(pb.collection('comments').getFullList).toHaveBeenCalledWith({
-      filter: 'project = "proj1" && path = "/pricing"',
+      filter: 'project = "pid1" && path = "/pricing"',
       sort: 'created',
       expand: 'author',
     })
+  })
+
+  it('caches the slug → id lookup across calls', async () => {
+    const { backend, pb } = setup()
+    await backend.listComments('proj1', '/a')
+    await backend.listComments('proj1', '/b')
+    await backend.listComments('proj1')
+
+    expect(pb.collection('projects').getFirstListItem).toHaveBeenCalledTimes(1)
+  })
+
+  it('does not cache a failed lookup (e.g. before login) — retries next call', async () => {
+    const { backend, pb } = setup()
+    pb.collection('projects').getFirstListItem
+      .mockRejectedValueOnce(new Error('401'))
+      .mockResolvedValueOnce({ id: 'pid1', slug: 'proj1' })
+
+    await expect(backend.listComments('proj1', '/a')).rejects.toThrow('401')
+    await backend.listComments('proj1', '/a')
+
+    expect(pb.collection('projects').getFirstListItem).toHaveBeenCalledTimes(2)
+    expect(pb.collection('comments').getFullList).toHaveBeenCalledWith(
+      expect.objectContaining({ filter: 'project = "pid1" && path = "/a"' }),
+    )
   })
 
   it('omitting path queries project-wide (sidebar list) with the same sort/expand', async () => {
@@ -147,7 +179,7 @@ describe('listComments', () => {
     await backend.listComments('proj1')
 
     expect(pb.collection('comments').getFullList).toHaveBeenCalledWith({
-      filter: 'project = "proj1"',
+      filter: 'project = "pid1"',
       sort: 'created',
       expand: 'author',
     })
@@ -163,7 +195,7 @@ describe('listComments', () => {
     pb.collection('comments').getFullList.mockResolvedValue([
       {
         id: 'c1',
-        project: 'proj1',
+        project: 'pid1',
         path: '/pricing',
         selector: 'h1',
         anchorMeta,
@@ -176,7 +208,7 @@ describe('listComments', () => {
       },
       {
         id: 'c2',
-        project: 'proj1',
+        project: 'pid1',
         path: '/pricing',
         selector: 'p',
         anchorMeta: null,
@@ -189,7 +221,7 @@ describe('listComments', () => {
       },
       {
         id: 'c3',
-        project: 'proj1',
+        project: 'pid1',
         path: '/pricing',
         selector: 'div',
         anchorMeta: null,
@@ -237,12 +269,13 @@ describe('createComment', () => {
     await expect(backend.createComment(input)).rejects.toThrow(/not (signed in|authenticated)/i)
   })
 
-  it('injects author from the auth store and maps the created record', async () => {
+  it('injects author, resolves the project slug to a record id, and maps the created record', async () => {
     const { backend, pb } = setup()
     pb.authStore.record = userRecord
     pb.collection('comments').create.mockResolvedValue({
       id: 'c9',
       ...input,
+      project: 'pid1',
       author: 'u1',
       resolved: false,
       created: 'x',
@@ -251,8 +284,11 @@ describe('createComment', () => {
 
     const rec = await backend.createComment(input)
 
+    // The relation field gets the record id, NOT the slug the overlay sends —
+    // sending the slug 400s against real PocketBase (missing_rel_records).
     expect(pb.collection('comments').create).toHaveBeenCalledWith({
       ...input,
+      project: 'pid1',
       author: 'u1',
     })
     expect(rec).toEqual(
@@ -322,9 +358,10 @@ describe('replies', () => {
 })
 
 describe('subscribe', () => {
+  // Realtime events deliver the stored record, whose project is the record id.
   const commentRecord = {
     id: 'c1',
-    project: 'proj1',
+    project: 'pid1',
     path: '/a',
     selector: 'h1',
     anchorMeta: null,
@@ -336,7 +373,7 @@ describe('subscribe', () => {
   }
   const replyRecord = { id: 'r1', comment: 'c1', body: 'rb', author: 'u1', created: 'x' }
 
-  function wire() {
+  async function wire() {
     const { backend, pb } = setup()
     const handlers = {
       onCommentCreate: vi.fn(),
@@ -347,24 +384,41 @@ describe('subscribe', () => {
       onReplyDelete: vi.fn(),
     }
     const unsubscribe = backend.subscribe('proj1', handlers)
+    await flushAsync() // slug → id lookup happens before the SDK subscribe
     const commentCb = pb.collection('comments').subscribe.mock.calls[0][1]
     const replyCb = pb.collection('replies').subscribe.mock.calls[0][1]
     return { backend, pb, handlers, unsubscribe, commentCb, replyCb }
   }
 
-  it('subscribes to both collections, scoping comments to the project', () => {
-    const { pb } = wire()
+  it('subscribes to both collections, scoping comments to the resolved project id', async () => {
+    const { pb } = await wire()
 
     expect(pb.collection('comments').subscribe).toHaveBeenCalledWith(
       '*',
       expect.any(Function),
-      { filter: 'project = "proj1"' },
+      { filter: 'project = "pid1"' },
     )
     expect(pb.collection('replies').subscribe).toHaveBeenCalledWith('*', expect.any(Function))
   })
 
-  it('dispatches comment events to the matching handlers with mapped records', () => {
-    const { handlers, commentCb } = wire()
+  it('unsubscribing before the project lookup lands cancels the subscribe', async () => {
+    const { backend, pb } = setup()
+    let release!: (v: unknown) => void
+    pb.collection('projects').getFirstListItem.mockReturnValue(
+      new Promise((resolve) => (release = resolve)),
+    )
+
+    const unsubscribe = backend.subscribe('proj1', {})
+    unsubscribe()
+    release({ id: 'pid1', slug: 'proj1' })
+    await flushAsync()
+
+    expect(pb.collection('comments').subscribe).not.toHaveBeenCalled()
+    expect(pb.collection('replies').subscribe).not.toHaveBeenCalled()
+  })
+
+  it('dispatches comment events to the matching handlers with mapped records', async () => {
+    const { handlers, commentCb } = await wire()
 
     commentCb({ action: 'create', record: commentRecord })
     expect(handlers.onCommentCreate).toHaveBeenCalledWith(
@@ -380,14 +434,14 @@ describe('subscribe', () => {
     expect(handlers.onReplyCreate).not.toHaveBeenCalled()
   })
 
-  it('ignores comment events from other projects (client-side belt and braces)', () => {
-    const { handlers, commentCb } = wire()
-    commentCb({ action: 'create', record: { ...commentRecord, project: 'other' } })
+  it('ignores comment events from other projects (client-side belt and braces)', async () => {
+    const { handlers, commentCb } = await wire()
+    commentCb({ action: 'create', record: { ...commentRecord, project: 'other-id' } })
     expect(handlers.onCommentCreate).not.toHaveBeenCalled()
   })
 
-  it('dispatches reply events to the matching handlers', () => {
-    const { handlers, replyCb } = wire()
+  it('dispatches reply events to the matching handlers', async () => {
+    const { handlers, replyCb } = await wire()
 
     replyCb({ action: 'create', record: replyRecord })
     expect(handlers.onReplyCreate).toHaveBeenCalledWith(
@@ -403,15 +457,16 @@ describe('subscribe', () => {
     expect(handlers.onCommentCreate).not.toHaveBeenCalled()
   })
 
-  it('tolerates missing handlers', () => {
+  it('tolerates missing handlers', async () => {
     const { backend, pb } = setup()
     backend.subscribe('proj1', {})
+    await flushAsync()
     const commentCb = pb.collection('comments').subscribe.mock.calls[0][1]
     expect(() => commentCb({ action: 'create', record: commentRecord })).not.toThrow()
   })
 
-  it('returned function unsubscribes both collections', () => {
-    const { pb, unsubscribe } = wire()
+  it('returned function unsubscribes both collections', async () => {
+    const { pb, unsubscribe } = await wire()
     unsubscribe()
     expect(pb.collection('comments').unsubscribe).toHaveBeenCalledWith('*')
     expect(pb.collection('replies').unsubscribe).toHaveBeenCalledWith('*')

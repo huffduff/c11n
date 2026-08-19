@@ -19,6 +19,7 @@ function submit() {
       class="c11n-input"
       type="email"
       placeholder="Email"
+      aria-label="Email"
       autocomplete="email"
       required
       :disabled="session.loading"
@@ -28,11 +29,12 @@ function submit() {
       class="c11n-input"
       type="password"
       placeholder="Password"
+      aria-label="Password"
       autocomplete="current-password"
       required
       :disabled="session.loading"
     />
-    <p v-if="session.error" class="c11n-login-error">{{ session.error }}</p>
+    <p v-if="session.error" class="c11n-login-error" role="alert">{{ session.error }}</p>
     <button class="c11n-btn" type="submit" :disabled="session.loading">
       {{ session.loading ? 'Signing in…' : 'Sign in' }}
     </button>

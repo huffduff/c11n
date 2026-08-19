@@ -35,8 +35,12 @@ export const useSessionStore = defineStore('session', {
     },
 
     logout() {
-      backend.logout()
-      this.me = null
+      try {
+        backend.logout()
+      } finally {
+        // Always drop the local session, even if the backend throws.
+        this.me = null
+      }
     },
   },
 })

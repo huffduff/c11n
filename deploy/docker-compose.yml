@@ -4,10 +4,13 @@ services:
     ports:
       - "8080:8080"
     volumes:
-      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - type: bind
+        source: ./Caddyfile
+        target: /etc/caddy/Caddyfile
+        read_only: true
       - ../packages/overlay/dist:/srv/overlay:ro
     environment:
-      - C11N_UPSTREAM=${C11N_UPSTREAM}
+      - C11N_UPSTREAM=${C11N_UPSTREAM:-http://demo:5173}
     depends_on:
       - pocketbase
       - demo

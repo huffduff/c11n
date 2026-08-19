@@ -22,6 +22,11 @@
 		reverse_proxy {$C11N_UPSTREAM:http://demo:5173} {
 			# don't let upstream compress; replace needs plaintext
 			header_up Accept-Encoding identity
+			# allow https upstreams with self-signed certs (e.g. a local
+			# vite dev server); harmless for plain-http upstreams
+			transport http {
+				tls_insecure_skip_verify
+			}
 			# staging-review tradeoff: strip CSP so the injected script runs
 			header_down -Content-Security-Policy
 		}

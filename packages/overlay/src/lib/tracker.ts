@@ -6,6 +6,9 @@
  * to do with it. Keeps geometry concerns out of components and stores.
  */
 
+/** What woke the tracker up (coalesced per animation frame). */
+export type TrackCause = 'initial' | 'scroll' | 'resize' | 'mutation'
+
 /**
  * Watch the targets returned by `getTargets` and report their viewport rects.
  *
@@ -14,18 +17,24 @@
  * change under document.body (one MutationObserver: childList + subtree +
  * attributes). All triggers funnel through a single requestAnimationFrame
  * gate with a dirty flag, so N triggers within one frame collapse into one
- * recompute. An initial recompute is scheduled on start.
+ * recompute; their causes are coalesced and passed to `onUpdate` so callers
+ * can react differently to mutations vs. plain scrolling.
+ *
+ * Disconnected targets get NO rect entry: a removed element measures 0×0 at
+ * (0,0), which would render UI pinned to the viewport corner. Callers treat
+ * a missing rect as "hide" and may re-resolve on mutation causes.
  *
  * Returns a cleanup function that removes the listeners, disconnects the
  * observer, and cancels/neutralizes any pending frame.
  */
 export function trackElements(
   getTargets: () => Map<string, Element>,
-  onUpdate: (rects: Map<string, DOMRect>) => void,
+  onUpdate: (rects: Map<string, DOMRect>, causes: Set<TrackCause>) => void,
 ): () => void {
   let dirty = false
   let stopped = false
   let rafId = 0
+  let pendingCauses = new Set<TrackCause>()
 
   // jsdom (tests) has no requestAnimationFrame; fall back to a ~1-frame
   // timeout. Looked up per call so test stubs installed later are honored.
@@ -39,38 +48,45 @@ export function trackElements(
     else clearTimeout(id)
   }
 
-  const recompute = () => {
+  const recompute = (causes: Set<TrackCause>) => {
     const rects = new Map<string, DOMRect>()
     for (const [key, el] of getTargets()) {
+      if (!el.isConnected) continue // removed element — no rect, caller hides
       rects.set(key, el.getBoundingClientRect())
     }
-    onUpdate(rects)
+    onUpdate(rects, causes)
   }
 
-  const schedule = () => {
-    if (dirty || stopped) return
+  const schedule = (cause: TrackCause) => {
+    if (stopped) return
+    pendingCauses.add(cause)
+    if (dirty) return
     dirty = true
     rafId = raf(() => {
       dirty = false
+      const causes = pendingCauses
+      pendingCauses = new Set()
       // Guard for environments where cancelAnimationFrame didn't land
       // (or cleanup raced the frame).
       if (stopped) return
-      recompute()
+      recompute(causes)
     })
   }
 
-  const observer = new MutationObserver(schedule)
+  const onScroll = () => schedule('scroll')
+  const onResize = () => schedule('resize')
+  const observer = new MutationObserver(() => schedule('mutation'))
 
-  window.addEventListener('scroll', schedule, { capture: true, passive: true })
-  window.addEventListener('resize', schedule)
+  window.addEventListener('scroll', onScroll, { capture: true, passive: true })
+  window.addEventListener('resize', onResize)
   observer.observe(document.body, { childList: true, subtree: true, attributes: true })
 
-  schedule() // initial rects
+  schedule('initial') // initial rects
 
   return () => {
     stopped = true
-    window.removeEventListener('scroll', schedule, { capture: true })
-    window.removeEventListener('resize', schedule)
+    window.removeEventListener('scroll', onScroll, { capture: true })
+    window.removeEventListener('resize', onResize)
     observer.disconnect()
     caf(rafId)
   }

@@ -149,4 +149,39 @@ describe('trackElements', () => {
 
     expect(onUpdate).not.toHaveBeenCalled()
   })
+
+  // Review fixes (Task 11 REQUEST_CHANGES).
+  it('omits disconnected targets from the rect map', () => {
+    const onUpdate = vi.fn()
+    track(onUpdate)
+    flushFrame()
+    expect(onUpdate.mock.calls[0][0].has('a')).toBe(true)
+    onUpdate.mockClear()
+
+    a.remove() // now disconnected — a 0×0 rect would pin UI to the corner
+
+    window.dispatchEvent(new Event('scroll'))
+    flushFrame()
+    const rects: Map<string, DOMRect> = onUpdate.mock.calls[0][0]
+    expect(rects.has('a')).toBe(false)
+    expect(rects.has('b')).toBe(true)
+  })
+
+  it('reports coalesced causes so callers can re-resolve on mutations', async () => {
+    const onUpdate = vi.fn()
+    track(onUpdate)
+    flushFrame()
+    expect(onUpdate.mock.calls[0][1]).toEqual(new Set(['initial']))
+    onUpdate.mockClear()
+
+    window.dispatchEvent(new Event('scroll'))
+    document.body.appendChild(document.createElement('em'))
+    await tick()
+    flushFrame()
+
+    expect(onUpdate).toHaveBeenCalledTimes(1)
+    const causes: Set<string> = onUpdate.mock.calls[0][1]
+    expect(causes.has('scroll')).toBe(true)
+    expect(causes.has('mutation')).toBe(true)
+  })
 })

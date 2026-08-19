@@ -218,4 +218,25 @@ describe('PinLayer.vue', () => {
 
     expect(wrapper.findAll('.c11n-pin')).toHaveLength(0)
   })
+
+  // Review fix (Task 11): late-rendered elements gain pins via mutation-driven
+  // re-resolution — the SPA-hydration case.
+  it('gains a pin when the anchored element renders after the initial resolve', async () => {
+    // c2's element (#beta) is NOT in the DOM yet: starts orphaned.
+    document.querySelector('#beta')?.remove()
+    const { wrapper } = mountLayer([c1(), c2()])
+    expect(wrapper.findAll('.c11n-pin')).toHaveLength(1)
+
+    // Late render (lazy chunk / async component finishes mounting).
+    const el = document.createElement('p')
+    el.id = 'beta'
+    el.textContent = 'Beta text'
+    document.body.appendChild(el)
+    // Let jsdom deliver the MutationObserver batch, then the (sync-stubbed)
+    // rAF recompute runs with cause=mutation → re-resolve.
+    await new Promise((r) => setTimeout(r, 0))
+    await nextTick()
+
+    expect(wrapper.findAll('.c11n-pin')).toHaveLength(2)
+  })
 })

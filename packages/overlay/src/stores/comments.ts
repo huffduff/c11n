@@ -324,6 +324,7 @@ export const useCommentsStore = defineStore('comments', {
     /** Mark resolved in place — PinLayer drops the pin reactively. */
     async resolve(commentId: string) {
       this.error = null
+      this.loading = true // disables the Resolve button; prevents double-fire
       try {
         await backend.setResolved(commentId, true)
         const item = this.items.find((c) => c.id === commentId)
@@ -331,6 +332,8 @@ export const useCommentsStore = defineStore('comments', {
         if (this.activeCommentId === commentId) this.activeCommentId = null
       } catch {
         this.error = 'Could not resolve comment'
+      } finally {
+        this.loading = false
       }
     },
   },

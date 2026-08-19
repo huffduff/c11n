@@ -27,7 +27,11 @@ const EMPTY_META: AnchorMeta = { tag: '', text: '', rect: { x: 0, y: 0, width: 0
  */
 export const useCommentsStore = defineStore('comments', {
   state: () => ({
-    /** All loaded comments for the current path — resolved AND unresolved. */
+    /**
+     * All loaded comments. Primarily the current path's list (setPath), but
+     * realtime upserts may add cross-path records — every consumer getter
+     * filters on currentPath, so never iterate this raw for per-page UI.
+     */
     items: [] as CommentRec[],
     currentPath: '',
     mode: 'off' as CommentMode,
@@ -38,6 +42,8 @@ export const useCommentsStore = defineStore('comments', {
     activeCommentId: null as string | null,
     /** Monotonic token so stale listComments responses can be discarded. */
     _pathToken: 0,
+    /** Same pattern for the project-wide sidebar fetch. */
+    _sidebarToken: 0,
     /** Per-comment reply cache, filled lazily by loadReplies. */
     replies: new Map<string, ReplyRec[]>(),
     /**
@@ -168,15 +174,23 @@ export const useCommentsStore = defineStore('comments', {
       this.sidebarOpen = !this.sidebarOpen
     },
 
-    /** Load the project-wide comment list (path omitted → all pages). */
+    /**
+     * Load the project-wide comment list (path omitted → all pages).
+     * Same stale-response token pattern as setPath: rapid close/reopen must
+     * not let an out-of-order response clobber the newer list.
+     */
     async loadSidebar() {
+      const token = ++this._sidebarToken
       this.sidebarLoading = true
       try {
-        this.sidebarComments = await backend.listComments(PROJECT)
+        const list = await backend.listComments(PROJECT)
+        if (token !== this._sidebarToken) return
+        this.sidebarComments = list
       } catch {
+        if (token !== this._sidebarToken) return
         this.error = 'Could not load comments'
       } finally {
-        this.sidebarLoading = false
+        if (token === this._sidebarToken) this.sidebarLoading = false
       }
     },
 
@@ -190,8 +204,9 @@ export const useCommentsStore = defineStore('comments', {
      *
      * Live events never carry `expand.author`, so `authorName` arrives
      * undefined. When the event's author is the signed-in user we backfill
-     * the name from the session store (imported lazily to avoid circular
-     * init between stores); for other authors the UI falls back to 'author'.
+     * the name from the session store (the useSessionStore() call is made
+     * inside the action so the store is only instantiated on demand); for
+     * other authors the UI falls back to 'author'.
      *
      * The replies stream is project-UNSCOPED (documented backend deviation:
      * replies carry no project field), so reply events are filtered here:

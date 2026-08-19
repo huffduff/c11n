@@ -84,21 +84,41 @@ function onRowClick(c: CommentRec) {
  * the reviewed page's light DOM where our shadow stylesheet can't reach, so
  * the visible flash is an inline outline save/restore (same pattern as the
  * picker hover highlight); the c11n-flash class is a marker/test hook.
+ *
+ * Re-flash safety: originals are captured once per element (WeakMap) and the
+ * pending restore timer is cancelled on re-entry — a rapid double-click must
+ * never capture the flash outline as the "original" and leave the customer's
+ * element permanently outlined.
  */
+const flashTimers = new WeakMap<HTMLElement, ReturnType<typeof setTimeout>>()
+const flashOriginals = new WeakMap<HTMLElement, { outline: string; offset: string }>()
+
 function flash(c: CommentRec) {
   const el = resolveAnchor({ selector: c.selector, meta: c.anchorMeta ?? EMPTY_META })
   if (!(el instanceof HTMLElement)) return
   el.scrollIntoView?.({ behavior: 'smooth', block: 'center' })
-  const prevOutline = el.style.outline
-  const prevOffset = el.style.outlineOffset
+
+  const pending = flashTimers.get(el)
+  if (pending !== undefined) clearTimeout(pending)
+  // Only capture originals when no flash is active on this element.
+  if (!flashOriginals.has(el)) {
+    flashOriginals.set(el, { outline: el.style.outline, offset: el.style.outlineOffset })
+  }
+
   el.classList.add('c11n-flash')
   el.style.outline = FLASH_OUTLINE
   el.style.outlineOffset = '2px'
-  setTimeout(() => {
-    el.classList.remove('c11n-flash')
-    el.style.outline = prevOutline
-    el.style.outlineOffset = prevOffset
-  }, FLASH_MS)
+  flashTimers.set(
+    el,
+    setTimeout(() => {
+      const orig = flashOriginals.get(el)
+      el.classList.remove('c11n-flash')
+      el.style.outline = orig?.outline ?? ''
+      el.style.outlineOffset = orig?.offset ?? ''
+      flashTimers.delete(el)
+      flashOriginals.delete(el)
+    }, FLASH_MS),
+  )
 }
 </script>
 

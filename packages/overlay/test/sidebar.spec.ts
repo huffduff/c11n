@@ -152,6 +152,28 @@ describe('Sidebar.vue', () => {
     expect(el.classList.contains('c11n-flash')).toBe(true)
   })
 
+  // Review fix (Task 12 blocker): rapid double-click must never leave the
+  // flash outline behind permanently on the reviewed page.
+  it('double-clicking a row restores the original outline after the flash', async () => {
+    vi.useFakeTimers()
+    try {
+      const el = document.querySelector('#alpha') as HTMLElement
+      el.style.outline = '1px dotted blue' // customer's own inline style
+      const { wrapper } = mountSidebar([rec({ id: 'c-here' })])
+
+      const row = wrapper.find('.c11n-sidebar-row')
+      await row.trigger('click')
+      vi.advanceTimersByTime(400) // mid-flash
+      await row.trigger('click') // second click while flash active
+
+      vi.advanceTimersByTime(5000) // all timers done
+      expect(el.classList.contains('c11n-flash')).toBe(false)
+      expect(el.style.outline).toBe('1px dotted blue') // original, not orange
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
   it('clicking a row for another page does not open a thread (navigates instead)', async () => {
     const { store, wrapper } = mountSidebar([rec({ id: 'c-away', path: '/about' })])
 

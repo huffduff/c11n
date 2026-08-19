@@ -35,13 +35,26 @@ export function createPocketBaseBackend(baseUrl = '/__c11n/pb'): C11nBackend {
     return a ? a.name || a.email : undefined
   }
 
+  /** PB json fields arrive parsed; guard against string-encoded edge cases. */
+  function parseAnchorMeta(v: unknown): CommentRec['anchorMeta'] {
+    if (v == null) return null
+    if (typeof v === 'string') {
+      try {
+        return JSON.parse(v)
+      } catch {
+        return null
+      }
+    }
+    return v as CommentRec['anchorMeta']
+  }
+
   function mapComment(r: AnyRecord): CommentRec {
     return {
       id: r.id,
       project: r.project,
       path: r.path,
       selector: r.selector,
-      anchorMeta: r.anchorMeta ?? null,
+      anchorMeta: parseAnchorMeta(r.anchorMeta),
       body: r.body,
       author: r.author,
       authorName: expandedAuthorName(r),

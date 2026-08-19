@@ -102,3 +102,12 @@ describe('resolveAnchor', () => {
     expect(resolveAnchor(anchorOf('#gone-123', 'p', 'overlay text'))).toBe(legit)
   })
 })
+
+// Review fix: corrupted meta.tag must not throw out of resolveAnchor.
+describe('resolveAnchor corrupted meta', () => {
+  it('returns null (no throw) when meta.tag is an invalid selector', () => {
+    const anchor = anchorOf('#definitely-gone-404', ':::garbage', 'whatever')
+    expect(() => resolveAnchor(anchor)).not.toThrow()
+    expect(resolveAnchor(anchor)).toBeNull()
+  })
+})

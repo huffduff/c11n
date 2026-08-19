@@ -64,9 +64,14 @@ export function resolveAnchor(anchor: Anchor): Element | null {
   const prefix = anchor.meta.text
   if (!prefix) return null
 
-  const candidates = Array.from(
-    document.querySelectorAll(anchor.meta.tag),
-  ).filter(
+  let matched: NodeListOf<Element>
+  try {
+    matched = document.querySelectorAll(anchor.meta.tag)
+  } catch {
+    // Corrupted/foreign meta.tag — same crash-safety contract as above.
+    return null
+  }
+  const candidates = Array.from(matched).filter(
     (el) => !insideHost(el) && (el.textContent ?? '').trim().startsWith(prefix),
   )
   return candidates.length === 1 ? candidates[0] : null

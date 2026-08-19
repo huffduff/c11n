@@ -40,6 +40,17 @@ describe('normalizePath', () => {
     expect(normalizePath('/a?t=2&t=1')).toBe('/a?t=2&t=1')
     expect(normalizePath('/a?t=2&s=0&t=1')).toBe('/a?s=0&t=2&t=1')
   })
+
+  it('returns malformed absolute-URL input as-is instead of throwing', () => {
+    // Never produced by location.href; lib-API safety net.
+    expect(normalizePath('http://[bad')).toBe('http://[bad')
+    expect(normalizePath('https://')).toBe('https://')
+  })
+
+  it('canonicalizes equivalent encodings to one identity', () => {
+    // Load-bearing for room-per-URL matching: %20 and + normalize the same.
+    expect(normalizePath('/a?x=a%20b')).toBe(normalizePath('/a?x=a+b'))
+  })
 })
 
 describe('onNavigate', () => {
@@ -124,5 +135,30 @@ describe('onNavigate', () => {
     unsub1()
     history.pushState(null, '', '/d4')
     expect(cb1).toHaveBeenCalledTimes(2)
+  })
+
+  it('never resurrects a callback under out-of-order cleanup', () => {
+    history.replaceState(null, '', '/o1')
+    const originalPush = history.pushState
+    const cbA = vi.fn()
+    const cbB = vi.fn()
+    const unsubA = onNavigate(cbA)
+    const unsubB = onNavigate(cbB)
+    // Out of order: A first. A's wrapper isn't installed (B wrapped it),
+    // so A must NOT restore — doing so would clobber B's wrapper.
+    unsubA()
+    history.pushState(null, '', '/o2')
+    // A is unsubscribed from pushState emits... but its wrapper is still in
+    // B's chain; the guarantee we lock is: after BOTH cleanups, no callback
+    // ever fires again and pushState behaves like the original.
+    unsubB()
+    const aCalls = cbA.mock.calls.length
+    const bCalls = cbB.mock.calls.length
+    history.pushState(null, '', '/o3')
+    window.dispatchEvent(new PopStateEvent('popstate'))
+    expect(cbA).toHaveBeenCalledTimes(aCalls) // no resurrection
+    expect(cbB).toHaveBeenCalledTimes(bCalls)
+    // Restore the pristine method for subsequent tests.
+    history.pushState = originalPush
   })
 })

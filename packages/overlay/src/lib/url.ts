@@ -21,8 +21,16 @@ function isTrackingParam(key: string): boolean {
  * Empty search yields no trailing `?`.
  */
 export function normalizePath(href: string): string {
-  // The base makes relative input parseable; the origin is discarded anyway.
-  const url = new URL(href, 'http://x')
+  let url: URL
+  try {
+    // The base makes relative input parseable; the origin is discarded anyway.
+    url = new URL(href, 'http://x')
+  } catch {
+    // Malformed absolute-URL-shaped input ('http://[bad', 'https://').
+    // Never produced by location.href; degrade to the raw input as identity
+    // rather than throwing inside the overlay.
+    return href
+  }
   const params = new URLSearchParams(url.search)
   for (const key of [...new Set(params.keys())]) {
     if (isTrackingParam(key)) params.delete(key)
@@ -38,14 +46,17 @@ export function normalizePath(href: string): string {
  * actually changed since the last emit.
  *
  * Keeps no module-global state: each call wraps the *current* history
- * methods, and the returned cleanup restores exactly what it saved and
- * removes its popstate listener. Nested subscriptions work as long as
- * cleanup happens in LIFO order.
+ * methods. The returned cleanup restores what it saved only when its own
+ * wrapper is still installed — under out-of-order cleanup of nested
+ * subscriptions it skips the restore (never resurrects a stale chain) and
+ * always removes its popstate listener.
  */
 export function onNavigate(cb: (path: string) => void): () => void {
   let last = normalizePath(location.href)
+  let active = true
 
   const emitIfChanged = () => {
+    if (!active) return
     const path = normalizePath(location.href)
     if (path !== last) {
       last = path
@@ -56,21 +67,30 @@ export function onNavigate(cb: (path: string) => void): () => void {
   const originalPushState = history.pushState
   const originalReplaceState = history.replaceState
 
-  history.pushState = function (this: History, ...args) {
+  const wrappedPushState = function (this: History, ...args: Parameters<History['pushState']>) {
     originalPushState.apply(this, args)
     emitIfChanged()
   } as typeof history.pushState
 
-  history.replaceState = function (this: History, ...args) {
+  const wrappedReplaceState = function (this: History, ...args: Parameters<History['replaceState']>) {
     originalReplaceState.apply(this, args)
     emitIfChanged()
   } as typeof history.replaceState
 
+  history.pushState = wrappedPushState
+  history.replaceState = wrappedReplaceState
+
   window.addEventListener('popstate', emitIfChanged)
 
   return () => {
-    history.pushState = originalPushState
-    history.replaceState = originalReplaceState
+    // Kill the callback unconditionally — our wrapper may live on inside a
+    // later subscriber's chain, where method restoration can't reach it.
+    active = false
+    // Only restore if our wrapper is still the installed one; otherwise a
+    // later subscriber wrapped us and restoring would resurrect our callback
+    // in its chain (or clobber theirs).
+    if (history.pushState === wrappedPushState) history.pushState = originalPushState
+    if (history.replaceState === wrappedReplaceState) history.replaceState = originalReplaceState
     window.removeEventListener('popstate', emitIfChanged)
   }
 }

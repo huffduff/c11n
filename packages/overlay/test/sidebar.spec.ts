@@ -152,6 +152,13 @@ describe('Sidebar.vue', () => {
     expect(el.classList.contains('c11n-flash')).toBe(true)
   })
 
+  it('renders seq number in sidebar row when present', () => {
+    const { wrapper } = mountSidebar([rec({ id: 'c-seq', seq: 17, body: 'a sequenced comment' })])
+    const seq = wrapper.find('.c11n-sidebar-row-seq')
+    expect(seq.exists()).toBe(true)
+    expect(seq.text()).toBe('#17')
+  })
+
   // Review fix (Task 12 blocker): rapid double-click must never leave the
   // flash outline behind permanently on the reviewed page.
   it('double-clicking a row restores the original outline after the flash', async () => {

@@ -10,6 +10,7 @@ export interface Me {
 /** A comment record as stored in the backend, mapped for the UI. */
 export interface CommentRec {
   id: string
+  seq?: number
   project: string
   path: string
   selector: string

@@ -72,7 +72,10 @@ function resolveThread() {
 <template>
   <div v-if="comment" ref="card" class="c11n-popover">
     <div class="c11n-popover-header">
-      <span class="c11n-popover-author">{{ displayName(comment.authorName) }}</span>
+      <span class="c11n-popover-author">
+        <span v-if="comment.seq" class="c11n-popover-seq">#{{ comment.seq }}</span>
+        {{ displayName(comment.authorName) }}
+      </span>
       <span class="c11n-popover-date">{{ displayDate(comment.created) }}</span>
       <button
         class="c11n-popover-close"

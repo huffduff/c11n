@@ -260,6 +260,18 @@
   gap: 8px;
 }
 
+.c11n-popover-seq {
+  font-weight: 700;
+  color: #2563eb;
+  margin-right: 4px;
+}
+
+.c11n-sidebar-row-seq {
+  font-weight: 700;
+  color: #2563eb;
+  margin-right: 4px;
+}
+
 .c11n-popover-author {
   font-weight: 600;
 }

@@ -101,6 +101,13 @@ describe('ThreadPopover.vue', () => {
     expect(wrapper.find('.c11n-popover-date').text()).not.toBe('')
   })
 
+  it('renders seq number in header when present', async () => {
+    const { wrapper } = await mountPopover(rec({ seq: 7 }))
+    const seq = wrapper.find('.c11n-popover-seq')
+    expect(seq.exists()).toBe(true)
+    expect(seq.text()).toBe('#7')
+  })
+
   it("falls back to 'author' when authorName is missing", async () => {
     const { wrapper } = await mountPopover(rec({ authorName: undefined }))
 

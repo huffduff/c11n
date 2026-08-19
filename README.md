@@ -1,55 +1,59 @@
-# c11n - Real-time Collaboration for Web App Reviews
+# c11n — stakeholder review for web projects
 
-c11n (pronounced "collaboration") is a real-time web application review and annotation tool that enables teams to provide feedback on live web applications through DOM-based annotations and collaborative discussions.
+c11n (pronounced "collaboration") lets stakeholders view a web project in
+development, ask questions, and leave comments pinned to the exact elements
+they're talking about — **without the reviewed site shipping a single line of
+c11n code**.
 
-## Architecture
+## How it works
 
-This is a monorepo containing:
+A Caddy reverse proxy sits in front of the site under review and injects one
+`<script>` tag into every HTML page. That script mounts a Vue 3 overlay
+(inside a shadow DOM, so styles never collide) with a comment toolbar, element
+pins, and a discussion sidebar. PocketBase stores users, comments, and replies
+and pushes realtime updates over SSE.
 
-- **`frontend/`** - Vue 3 + TypeScript collaborative review interface
-- **`backend/`** - Go HTTP server with WebSocket support for real-time collaboration
+```
+stakeholder ──▶ Caddy proxy (:8080)
+                 ├── /               ▶ your site (dev server, preview, staging)
+                 │                     + injected <script src="/__c11n/overlay.js">
+                 ├── /__c11n/*       ▶ overlay bundle (static)
+                 └── /__c11n/pb/*    ▶ PocketBase (auth, comments, realtime SSE)
+```
 
-## Key Features
+Same-origin by construction: no CORS, no third-party cookies, SSE just works.
 
-- **DOM Element Targeting**: Annotations target DOM elements via CSS selectors, not screen coordinates
-- **URL-Based Persistence**: Comments persist across page navigation within the reviewed application
-- **Real-time Collaboration**: Live cursor presence, annotations, and discussions
-- **iframe Integration**: Reviews any web application through iframe embedding with script injection
+## Repo layout
 
-## Quick Start
+- `packages/overlay/` — Vue 3 overlay, built as a single IIFE bundle
+- `deploy/` — Caddy (with `replace-response`) + PocketBase, Docker Compose
+- `examples/demo-vue/` — demo Vue Router app to review
+- `docs/` — [architecture](docs/architecture.md), [quickstart](docs/quickstart.md)
 
-### Frontend (Vue 3)
+## Quick start
+
 ```bash
-cd frontend
+cd deploy
+cp .env.example .env   # point C11N_UPSTREAM at the site to review
+docker compose up --build
+# open http://localhost:8080
+```
+
+See [docs/quickstart.md](docs/quickstart.md) for user setup and details.
+
+## Development
+
+```bash
+asdf install          # nodejs from .tool-versions
 npm install
-npm run dev
+npm run build         # builds packages/overlay → dist/overlay.js
+npm test
 ```
 
-### Backend (Go)
-```bash
-cd backend
-go mod tidy
-go run cmd/api/main.go
-```
+## Status
 
-## How It Works
-
-1. **Target Application**: Load any web app in an iframe
-2. **Script Injection**: Automatically inject annotation capabilities via JavaScript
-3. **DOM Targeting**: Click elements to create annotations using CSS selectors
-4. **Real-time Sync**: WebSocket connections sync annotations across all users
-5. **URL Persistence**: Navigate the app while maintaining annotation context
-
-## Technical Architecture
-
-- **Frontend**: Vue 3 composition API with real-time WebSocket synchronization
-- **Backend**: Go with Chi router, WebSocket rooms organized by URL
-- **Annotation Storage**: DOM selector-based with URL indexing for fast retrieval
-- **Real-time**: WebSocket rooms partitioned by reviewed URL for performance
-
-## Development Status
-
-🚧 **In Development** - Core architecture established, implementing features incrementally
+🚧 Rebooted 2026-08-19 — see `.kilo/plans/2026-08-19-c11n-reboot.md`. The
+previous iframe/Go prototype lives in git history before this point.
 
 ## License
 

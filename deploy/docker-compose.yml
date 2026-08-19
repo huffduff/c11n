@@ -1,0 +1,23 @@
+services:
+  caddy:
+    build: ./caddy
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - ../packages/overlay/dist:/srv/overlay:ro
+    environment:
+      - C11N_UPSTREAM=${C11N_UPSTREAM}
+    depends_on:
+      - pocketbase
+
+  pocketbase:
+    build: ./pocketbase
+    volumes:
+      - pb_data:/pb/pb_data
+    ports:
+      # admin UI only; the API is same-origin via caddy at /__c11n/pb/
+      - "8090:8090"
+
+volumes:
+  pb_data:

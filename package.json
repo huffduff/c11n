@@ -1,0 +1,13 @@
+{
+  "name": "c11n",
+  "private": true,
+  "workspaces": [
+    "packages/*",
+    "examples/*"
+  ],
+  "scripts": {
+    "build": "npm run build -w packages/overlay",
+    "test": "npm run test -w packages/overlay",
+    "lint": "npm run lint --workspaces --if-present"
+  }
+}

@@ -35,6 +35,8 @@ export const useCommentsStore = defineStore('comments', {
     error: null as string | null,
     /** Comment whose thread popover is open, if any. */
     activeCommentId: null as string | null,
+    /** Monotonic token so stale listComments responses can be discarded. */
+    _pathToken: 0,
     /** Per-comment reply cache, filled lazily by loadReplies. */
     replies: new Map<string, ReplyRec[]>(),
     /**
@@ -65,18 +67,35 @@ export const useCommentsStore = defineStore('comments', {
   },
 
   actions: {
-    /** Switch page identity and (re)load its comments. */
+    /**
+     * Switch page identity and (re)load its comments.
+     *
+     * Guards:
+     * - request token: out-of-order responses from rapid navigations must
+     *   not clobber newer state (slow /a response landing after /b's).
+     * - abandons any in-progress compose/thread: their anchors belong to
+     *   the page we just left; saving them here would persist a comment on
+     *   the wrong path (review issue #2, Task 10).
+     */
     async setPath(path: string) {
+      if (this.pendingAnchor) this.pendingAnchor = null
+      if (this.mode === 'pick') this.mode = 'off'
+      this.activeCommentId = null
+
+      const token = ++this._pathToken
       this.currentPath = path
       this.loading = true
       this.error = null
       try {
-        this.items = await backend.listComments(PROJECT, path)
+        const items = await backend.listComments(PROJECT, path)
+        if (token !== this._pathToken) return // stale response — ignore
+        this.items = items
       } catch {
+        if (token !== this._pathToken) return
         this.items = []
         this.error = 'Could not load comments'
       } finally {
-        this.loading = false
+        if (token === this._pathToken) this.loading = false
       }
     },
 

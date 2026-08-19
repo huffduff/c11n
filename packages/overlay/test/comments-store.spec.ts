@@ -411,4 +411,50 @@ describe('useCommentsStore', () => {
       expect(store.activeCommentId).toBe('c1')
     })
   })
+
+  // Review fixes (Task 10 REQUEST_CHANGES): async race + mid-compose nav.
+  describe('setPath guards', () => {
+    it('ignores out-of-order responses from rapid navigations', async () => {
+      let resolveSlow!: (v: CommentRec[]) => void
+      const slow = new Promise<CommentRec[]>((r) => (resolveSlow = r))
+      const mock = makeMockBackend({
+        listComments: vi
+          .fn()
+          .mockReturnValueOnce(slow) // /a — resolves late
+          .mockResolvedValueOnce([rec({ id: 'c-b', path: '/b' })]), // /b — fast
+      })
+      setBackend(mock)
+      const store = useCommentsStore()
+
+      const first = store.setPath('/a')
+      await store.setPath('/b')
+      expect(store.items.map((c) => c.id)).toEqual(['c-b'])
+      expect(store.loading).toBe(false)
+
+      // The stale /a response lands after /b already settled — must be ignored.
+      resolveSlow([rec({ id: 'c-a-stale', path: '/a' })])
+      await first
+      expect(store.currentPath).toBe('/b')
+      expect(store.items.map((c) => c.id)).toEqual(['c-b'])
+      expect(store.loading).toBe(false)
+    })
+
+    it('abandons a pending compose and open thread on navigation', async () => {
+      const mock = makeMockBackend()
+      setBackend(mock)
+      const store = useCommentsStore()
+
+      store.enterPickMode()
+      store.beginCompose(anchor)
+      store.openThread('c1')
+      await store.setPath('/elsewhere')
+
+      expect(store.pendingAnchor).toBeNull()
+      expect(store.mode).toBe('off')
+      expect(store.activeCommentId).toBeNull()
+      // A save attempted after nav must be a no-op (no wrong-page comment).
+      await store.saveComment('stale draft')
+      expect(mock.createComment).not.toHaveBeenCalled()
+    })
+  })
 })

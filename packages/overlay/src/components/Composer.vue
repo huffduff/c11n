@@ -15,7 +15,9 @@ const textarea = ref<HTMLTextAreaElement | null>(null)
 onMounted(async () => {
   textarea.value?.focus()
   const reference = getLastPickedElement()
-  if (!reference || !panel.value) return
+  // A disconnected reference measures 0×0 at (0,0) — the composer would pin
+  // to the viewport corner. Fall back to the default centered position.
+  if (!reference || !reference.isConnected || !panel.value) return
   const { x, y } = await computePosition(reference, panel.value, {
     placement: 'bottom-start',
     strategy: 'fixed',

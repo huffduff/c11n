@@ -63,6 +63,10 @@ migrate((app) => {
       { type: "autodate", name: "created", onCreate: true },
       { type: "autodate", name: "updated", onCreate: true, onUpdate: true },
     ],
+    indexes: [
+      // Hot query: the overlay lists comments per project+page on every load/navigation.
+      "CREATE INDEX idx_comments_project_path ON comments (project, path)",
+    ],
   });
   app.save(comments);
 

@@ -8,8 +8,12 @@ migrate((app) => {
   record.set("slug", "default");
   app.save(record);
 }, (app) => {
-  const record = app.findFirstRecordByData("projects", "slug", "default");
-  if (record) {
+  // findFirstRecordByData throws (rather than returning null) when no row
+  // matches, so guard the down-path against an already-deleted seed row.
+  try {
+    const record = app.findFirstRecordByData("projects", "slug", "default");
     app.delete(record);
+  } catch {
+    // seed row already gone — nothing to do
   }
 });

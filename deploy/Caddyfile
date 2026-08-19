@@ -19,13 +19,16 @@
 
 	# The site under review, with script injection
 	handle {
-		reverse_proxy {$C11N_UPSTREAM} {
+		reverse_proxy {$C11N_UPSTREAM:http://demo:5173} {
 			# don't let upstream compress; replace needs plaintext
 			header_up Accept-Encoding identity
 			# staging-review tradeoff: strip CSP so the injected script runs
 			header_down -Content-Security-Policy
 		}
-		replace stream {
+		# Only rewrite responses to HTML-document requests, so JS/JSON bodies
+		# containing a literal "</head>" are never mangled.
+		@html header Accept *text/html*
+		replace @html stream {
 			`</head>` `<script src="/__c11n/overlay.js" defer></script></head>`
 		}
 	}

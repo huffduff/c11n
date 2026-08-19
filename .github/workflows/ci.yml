@@ -1,0 +1,60 @@
+# c11n CI
+#
+# Two independent jobs:
+#   - overlay: typecheck, build, and test the Vue overlay bundle; uploads
+#     the built overlay.js as an artifact.
+#   - docker:  smoke-builds both deploy images (deploy/caddy, deploy/pocketbase).
+#     This is the first place these Dockerfiles are actually built — the dev
+#     environment has no Docker daemon, and both prior reviews flagged them as
+#     untested. A green docker job here is the real verification.
+
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  overlay:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .tool-versions
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Typecheck overlay
+        run: npm run typecheck -w packages/overlay
+
+      # Build BEFORE test on purpose: test/mount-dist.spec auto-skips when
+      # packages/overlay/dist is absent. Building first means the dist smoke
+      # test runs against the freshly built bundle instead of silently skipping.
+      - name: Build overlay bundle
+        run: npm run build -w packages/overlay
+
+      - name: Test overlay (includes dist smoke test)
+        run: npm test -w packages/overlay -- --run
+
+      - name: Upload overlay.js artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: overlay.js
+          path: packages/overlay/dist/overlay.js
+          if-no-files-found: error
+
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Smoke-build caddy image
+        run: docker build -t c11n-caddy:ci deploy/caddy
+
+      - name: Smoke-build pocketbase image
+        run: docker build -t c11n-pb:ci deploy/pocketbase

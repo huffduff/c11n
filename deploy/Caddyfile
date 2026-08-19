@@ -1,0 +1,32 @@
+{
+	order replace after encode
+}
+
+:8080 {
+	# PocketBase API + realtime, same-origin under /__c11n/pb/
+	handle_path /__c11n/pb/* {
+		reverse_proxy pocketbase:8090 {
+			# SSE: stream responses immediately
+			flush_interval -1
+		}
+	}
+
+	# Overlay bundle
+	handle_path /__c11n/* {
+		root * /srv/overlay
+		file_server
+	}
+
+	# The site under review, with script injection
+	handle {
+		reverse_proxy {$C11N_UPSTREAM} {
+			# don't let upstream compress; replace needs plaintext
+			header_up Accept-Encoding identity
+			# staging-review tradeoff: strip CSP so the injected script runs
+			header_down -Content-Security-Policy
+		}
+		replace stream {
+			`</head>` `<script src="/__c11n/overlay.js" defer></script></head>`
+		}
+	}
+}

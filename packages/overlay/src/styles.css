@@ -119,3 +119,92 @@
   opacity: 0.6;
   cursor: default;
 }
+
+.c11n-btn-ghost {
+  background: transparent;
+  color: #1a1a2e;
+  border: 1px solid #d0d0d8;
+  font-weight: 500;
+}
+
+.c11n-btn-ghost:hover:not(:disabled) {
+  background: #f2f2f7;
+}
+
+.c11n-mode-toggle {
+  border: 0;
+  width: 24px;
+  height: 24px;
+  border-radius: 50%;
+  font: inherit;
+  font-size: 13px;
+  line-height: 1;
+  background: rgba(255, 255, 255, 0.15);
+  color: #fff;
+  cursor: pointer;
+}
+
+.c11n-mode-toggle:hover {
+  background: rgba(255, 255, 255, 0.28);
+}
+
+.c11n-mode-toggle.c11n-mode-on {
+  background: #4f6df5;
+}
+
+.c11n-badge {
+  min-width: 18px;
+  padding: 1px 5px;
+  border-radius: 999px;
+  text-align: center;
+  font-size: 11px;
+  font-weight: 700;
+  background: #e74c3c;
+  color: #fff;
+}
+
+.c11n-composer {
+  position: fixed;
+  top: 0;
+  left: 0;
+  z-index: 2147483647;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  width: 260px;
+  padding: 12px;
+  border-radius: 12px;
+  background: #fff;
+  box-shadow: 0 4px 24px rgba(0, 0, 0, 0.25);
+}
+
+.c11n-composer-text {
+  padding: 7px 10px;
+  border: 1px solid #d0d0d8;
+  border-radius: 8px;
+  font: inherit;
+  resize: vertical;
+  background: #fff;
+  color: inherit;
+}
+
+.c11n-composer-text:focus {
+  outline: 2px solid #4f6df5;
+  outline-offset: -1px;
+}
+
+.c11n-composer-text:disabled {
+  opacity: 0.6;
+}
+
+.c11n-composer-error {
+  margin: 0;
+  font-size: 12px;
+  color: #c0392b;
+}
+
+.c11n-composer-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}

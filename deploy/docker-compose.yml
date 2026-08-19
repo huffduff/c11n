@@ -10,6 +10,19 @@ services:
       - C11N_UPSTREAM=${C11N_UPSTREAM}
     depends_on:
       - pocketbase
+      - demo
+
+  # The site under review. Any HTML upstream works; this demo runs the
+  # examples/demo-vue dev server so the stack proves itself out of the box.
+  # Point C11N_UPSTREAM elsewhere (and drop this service) to review your own app.
+  demo:
+    image: node:24-alpine
+    working_dir: /app
+    volumes:
+      - ../examples/demo-vue:/app
+    command: sh -c "npm install && npm run dev -- --host"
+    expose:
+      - "5173"
 
   pocketbase:
     build: ./pocketbase

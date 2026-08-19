@@ -8,6 +8,7 @@ import Toolbar from './components/Toolbar.vue'
 import Composer from './components/Composer.vue'
 import PinLayer from './components/PinLayer.vue'
 import ThreadPopover from './components/ThreadPopover.vue'
+import Sidebar from './components/Sidebar.vue'
 import { useSessionStore } from './stores/session'
 import { useCommentsStore } from './stores/comments'
 import { createAnchor } from './lib/anchor'
@@ -23,8 +24,9 @@ let stopNav: (() => void) | null = null
 
 onMounted(() => session.init())
 
-// Auth drives page tracking: load comments for the current page and follow
-// SPA navigations while signed in; tear down (and leave pick mode) on logout.
+// Auth drives page tracking + realtime: load comments for the current page,
+// follow SPA navigations, and hold one live subscription while signed in;
+// tear all of it down (and leave pick mode) on logout.
 watch(
   () => session.isAuthed,
   (authed) => {
@@ -32,13 +34,28 @@ watch(
       showLogin.value = false
       comments.setPath(normalizePath(location.href))
       stopNav = onNavigate((path) => comments.setPath(path))
+      comments.startRealtime()
     } else {
       stopNav?.()
       stopNav = null
       comments.exitPickMode()
+      comments.stopRealtime()
     }
   },
 )
+
+// Sidebar opening triggers the project-wide load (kept out of toggleSidebar
+// so the store action stays a pure flag flip).
+watch(
+  () => comments.sidebarOpen,
+  (open) => {
+    if (open) comments.loadSidebar()
+  },
+)
+
+// Belt-and-braces: close the SSE connection on full page unload too.
+const onBeforeUnload = () => comments.stopRealtime()
+window.addEventListener('beforeunload', onBeforeUnload)
 
 // Mode drives the picker: capture-phase listeners keep body clicks from ever
 // reaching the reviewed SPA while picking.
@@ -65,6 +82,8 @@ watch(
 onBeforeUnmount(() => {
   stopPicking?.()
   stopNav?.()
+  comments.stopRealtime()
+  window.removeEventListener('beforeunload', onBeforeUnload)
 })
 </script>
 
@@ -74,6 +93,7 @@ onBeforeUnmount(() => {
          already keeps pick-mode clicks and pin clicks from fighting. -->
     <PinLayer />
     <Toolbar />
+    <Sidebar v-if="comments.sidebarOpen" />
     <Composer v-if="comments.pendingAnchor" />
     <!-- Keyed so switching threads remounts (fresh replies load + position). -->
     <ThreadPopover

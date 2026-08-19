@@ -14,7 +14,10 @@ export const backend: C11nBackend = {
   login: (email, password) => impl.login(email, password),
   logout: () => impl.logout(),
   me: () => impl.me(),
-  listComments: (project, path) => impl.listComments(project, path),
+  // Arity-preserving: an omitted path must reach the impl as an omitted
+  // argument (project-wide sidebar query), not an explicit undefined.
+  listComments: (project, path) =>
+    path === undefined ? impl.listComments(project) : impl.listComments(project, path),
   createComment: (input) => impl.createComment(input),
   setResolved: (id, resolved) => impl.setResolved(id, resolved),
   listReplies: (commentId) => impl.listReplies(commentId),

@@ -6,12 +6,18 @@ export type { CommentRec, Me, NewComment, RealtimeHandlers, ReplyRec }
 /**
  * Swappable data-access layer for the overlay. The UI only ever talks to
  * this interface; `createPocketBaseBackend` is the v1 implementation.
+ * A later Go swap reimplements these 8 methods + SSE behind `subscribe`.
  */
 export interface C11nBackend {
   login(email: string, password: string): Promise<Me>
   logout(): void
   me(): Me | null
-  listComments(project: string, path: string): Promise<CommentRec[]>
+  /**
+   * Comments sorted by `created` asc. With `path`: the hot per-page query.
+   * Without `path`: every comment in the project (sidebar listing) — any
+   * replacement backend must honor both shapes.
+   */
+  listComments(project: string, path?: string): Promise<CommentRec[]>
   createComment(input: NewComment): Promise<CommentRec>
   setResolved(id: string, resolved: boolean): Promise<void>
   listReplies(commentId: string): Promise<ReplyRec[]>
@@ -100,8 +106,13 @@ export function createPocketBaseBackend(baseUrl = '/__c11n/pb'): C11nBackend {
     },
 
     async listComments(project, path) {
+      // Path omitted → project-wide list (sidebar); provided → per-page load.
+      const filter =
+        path === undefined
+          ? pb.filter('project = {:project}', { project })
+          : pb.filter('project = {:project} && path = {:path}', { project, path })
       const records = await pb.collection('comments').getFullList({
-        filter: pb.filter('project = {:project} && path = {:path}', { project, path }),
+        filter,
         sort: 'created',
         expand: 'author',
       })

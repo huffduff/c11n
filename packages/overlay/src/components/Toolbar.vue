@@ -27,6 +27,16 @@ function toggleMode() {
     >
       ✚
     </button>
+    <button
+      class="c11n-sidebar-toggle"
+      :class="{ 'c11n-mode-on': comments.sidebarOpen }"
+      type="button"
+      :title="comments.sidebarOpen ? 'Hide comment list' : 'Show comment list'"
+      :aria-pressed="comments.sidebarOpen"
+      @click="comments.toggleSidebar()"
+    >
+      ≡
+    </button>
     <span v-if="comments.unresolvedCount > 0" class="c11n-badge">
       {{ comments.unresolvedCount }}
     </span>

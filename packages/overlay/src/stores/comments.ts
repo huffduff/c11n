@@ -2,6 +2,7 @@ import { defineStore } from 'pinia'
 import { backend } from '../lib/backend'
 import { PROJECT } from '../lib/project'
 import { resolveAnchor } from '../lib/anchor'
+import { useSessionStore } from './session'
 import type { Anchor, AnchorMeta } from '../lib/anchor'
 import type { CommentRec, ReplyRec } from '../lib/types'
 
@@ -45,6 +46,13 @@ export const useCommentsStore = defineStore('comments', {
      * ("element not found", Task 12).
      */
     orphans: [] as CommentRec[],
+    /** Sidebar visibility. UI-ish, but one flag doesn't warrant its own store. */
+    sidebarOpen: false,
+    /** Project-wide comment list (every page), loaded when the sidebar opens. */
+    sidebarComments: [] as CommentRec[],
+    sidebarLoading: false,
+    /** Realtime teardown fn; null when not subscribed (also the re-entry guard). */
+    _unsubRealtime: null as (() => void) | null,
   }),
 
   getters: {
@@ -141,7 +149,7 @@ export const useCommentsStore = defineStore('comments', {
       }
     },
 
-    // Realtime hooks (wired up in Task 12).
+    // Realtime hooks (wired by startRealtime, Task 12).
     upsertFromRealtime(rec: CommentRec) {
       const i = this.items.findIndex((c) => c.id === rec.id)
       if (i === -1) this.items.push(rec)
@@ -150,6 +158,102 @@ export const useCommentsStore = defineStore('comments', {
 
     removeFromRealtime(id: string) {
       this.items = this.items.filter((c) => c.id !== id)
+    },
+
+    // ------------------------------------------------------------------
+    // Sidebar (Task 12)
+    // ------------------------------------------------------------------
+
+    toggleSidebar() {
+      this.sidebarOpen = !this.sidebarOpen
+    },
+
+    /** Load the project-wide comment list (path omitted → all pages). */
+    async loadSidebar() {
+      this.sidebarLoading = true
+      try {
+        this.sidebarComments = await backend.listComments(PROJECT)
+      } catch {
+        this.error = 'Could not load comments'
+      } finally {
+        this.sidebarLoading = false
+      }
+    },
+
+    // ------------------------------------------------------------------
+    // Realtime (Task 12)
+    // ------------------------------------------------------------------
+
+    /**
+     * Subscribe to live comment/reply events for PROJECT. Idempotent: a
+     * second call while subscribed is a no-op (`_unsubRealtime` is the guard).
+     *
+     * Live events never carry `expand.author`, so `authorName` arrives
+     * undefined. When the event's author is the signed-in user we backfill
+     * the name from the session store (imported lazily to avoid circular
+     * init between stores); for other authors the UI falls back to 'author'.
+     *
+     * The replies stream is project-UNSCOPED (documented backend deviation:
+     * replies carry no project field), so reply events are filtered here:
+     * only threads already in the replies cache are patched.
+     */
+    startRealtime() {
+      if (this._unsubRealtime) return
+      const session = useSessionStore()
+
+      const backfill = <T extends { author: string; authorName?: string }>(rec: T): T => {
+        if (rec.authorName === undefined && session.me && rec.author === session.me.id) {
+          return { ...rec, authorName: session.me.name }
+        }
+        return rec
+      }
+
+      const upsertSidebar = (rec: CommentRec) => {
+        const i = this.sidebarComments.findIndex((c) => c.id === rec.id)
+        if (i === -1) this.sidebarComments.push(rec)
+        else this.sidebarComments[i] = rec
+      }
+
+      const onCommentUpsert = (rec: CommentRec) => {
+        const filled = backfill(rec)
+        this.upsertFromRealtime(filled)
+        upsertSidebar(filled)
+      }
+
+      this._unsubRealtime = backend.subscribe(PROJECT, {
+        onCommentCreate: onCommentUpsert,
+        onCommentUpdate: onCommentUpsert,
+        onCommentDelete: (rec) => {
+          this.removeFromRealtime(rec.id)
+          this.sidebarComments = this.sidebarComments.filter((c) => c.id !== rec.id)
+        },
+        onReplyCreate: (reply) => {
+          const cached = this.replies.get(reply.comment)
+          if (!cached) return // unknown thread — unscoped stream, ignore
+          // Dedupe: our own reply is already appended by addReply.
+          if (!cached.some((r) => r.id === reply.id)) cached.push(backfill(reply))
+        },
+        onReplyUpdate: (reply) => {
+          const cached = this.replies.get(reply.comment)
+          if (!cached) return
+          const i = cached.findIndex((r) => r.id === reply.id)
+          if (i !== -1) cached[i] = backfill(reply)
+        },
+        onReplyDelete: (reply) => {
+          const cached = this.replies.get(reply.comment)
+          if (!cached) return
+          this.replies.set(
+            reply.comment,
+            cached.filter((r) => r.id !== reply.id),
+          )
+        },
+      })
+    },
+
+    /** Tear down the realtime subscription. Safe to call repeatedly. */
+    stopRealtime() {
+      this._unsubRealtime?.()
+      this._unsubRealtime = null
     },
 
     /**

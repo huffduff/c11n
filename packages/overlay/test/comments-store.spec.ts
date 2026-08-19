@@ -264,6 +264,43 @@ describe('useCommentsStore', () => {
     })
   })
 
+  describe('sidebar state', () => {
+    it('toggleSidebar flips sidebarOpen', () => {
+      setBackend(makeMockBackend())
+      const store = useCommentsStore()
+      expect(store.sidebarOpen).toBe(false)
+
+      store.toggleSidebar()
+      expect(store.sidebarOpen).toBe(true)
+
+      store.toggleSidebar()
+      expect(store.sidebarOpen).toBe(false)
+    })
+
+    it('loadSidebar fetches the project-wide list (no path argument)', async () => {
+      const all = [rec({ id: 'c-here' }), rec({ id: 'c-away', path: '/about' })]
+      const listComments = vi.fn().mockResolvedValue(all)
+      setBackend(makeMockBackend({ listComments }))
+      const store = useCommentsStore()
+
+      await store.loadSidebar()
+
+      expect(listComments).toHaveBeenCalledWith(PROJECT)
+      expect(store.sidebarComments).toEqual(all)
+      expect(store.sidebarLoading).toBe(false)
+    })
+
+    it('loadSidebar failure sets error and clears the loading flag', async () => {
+      setBackend(makeMockBackend({ listComments: vi.fn().mockRejectedValue(new Error('boom')) }))
+      const store = useCommentsStore()
+
+      await store.loadSidebar()
+
+      expect(store.error).toBe('Could not load comments')
+      expect(store.sidebarLoading).toBe(false)
+    })
+  })
+
   describe('thread state', () => {
     it('openThread/closeThread set and clear activeCommentId', () => {
       setBackend(makeMockBackend())

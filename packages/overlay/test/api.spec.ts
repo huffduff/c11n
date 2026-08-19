@@ -142,6 +142,17 @@ describe('listComments', () => {
     })
   })
 
+  it('omitting path queries project-wide (sidebar list) with the same sort/expand', async () => {
+    const { backend, pb } = setup()
+    await backend.listComments('proj1')
+
+    expect(pb.collection('comments').getFullList).toHaveBeenCalledWith({
+      filter: 'project = "proj1"',
+      sort: 'created',
+      expand: 'author',
+    })
+  })
+
   it('maps records, pulling authorName from expand.author (name, then email)', async () => {
     const { backend, pb } = setup()
     const anchorMeta = {

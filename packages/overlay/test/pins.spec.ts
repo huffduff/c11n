@@ -91,6 +91,16 @@ describe('comments store resolvePins', () => {
     expect(orphaned.map((c) => c.id)).toEqual(['c3'])
   })
 
+  it('sorts pins by persistent seq when present', () => {
+    const s1 = rec({ id: 's1', seq: 5, selector: '#alpha' })
+    const s2 = rec({ id: 's2', seq: 2, selector: '#beta' })
+    const store = seedStore([s1, s2])
+
+    const { pinned } = store.resolvePins()
+
+    expect(pinned.map((p) => p.comment.id)).toEqual(['s2', 's1'])
+  })
+
   it('exposes orphans on state for the sidebar (Task 12)', () => {
     const store = seedStore([c1(), orphan()])
 
@@ -173,6 +183,15 @@ describe('PinLayer.vue', () => {
     const pins = wrapper.findAll('.c11n-pin')
     expect(pins).toHaveLength(2)
     expect(pins.map((p) => p.text())).toEqual(['1', '2'])
+  })
+
+  it('renders persistent seq number on the pin button when available', () => {
+    const s1 = rec({ id: 's1', seq: 42, selector: '#alpha' })
+    const { wrapper } = mountLayer([s1])
+
+    const pin = wrapper.find('.c11n-pin')
+    expect(pin.text()).toBe('42')
+    expect(pin.attributes('aria-label')).toBe('Open comment thread 42')
   })
 
   it('positions pins from tracker rects (inline fixed left/top)', () => {

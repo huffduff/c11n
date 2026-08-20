@@ -195,6 +195,7 @@ describe('listComments', () => {
     pb.collection('comments').getFullList.mockResolvedValue([
       {
         id: 'c1',
+        seq: 1,
         project: 'pid1',
         path: '/pricing',
         selector: 'h1',
@@ -238,6 +239,7 @@ describe('listComments', () => {
     expect(out).toEqual([
       {
         id: 'c1',
+        seq: 1,
         project: 'proj1',
         path: '/pricing',
         selector: 'h1',

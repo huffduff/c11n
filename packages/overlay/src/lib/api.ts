@@ -86,6 +86,7 @@ export function createPocketBaseBackend(baseUrl = '/__c11n/pb'): C11nBackend {
   function mapComment(r: AnyRecord): CommentRec {
     return {
       id: r.id,
+      seq: typeof r.seq === 'number' ? r.seq : undefined,
       // Stored as a record id; surface the slug the overlay knows when we
       // have it (resolved earlier in this session), else pass through as-is.
       project: slugById.get(r.project) ?? r.project,

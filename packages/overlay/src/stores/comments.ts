@@ -284,9 +284,14 @@ export const useCommentsStore = defineStore('comments', {
      * (surfaced in the sidebar as "element not found").
      */
     resolvePins(): { pinned: ResolvedPin[]; orphaned: CommentRec[] } {
-      const ordered = [...this.unresolvedForCurrentPath].sort((a, b) =>
-        a.created < b.created ? -1 : a.created > b.created ? 1 : 0,
-      )
+      const ordered = [...this.unresolvedForCurrentPath].sort((a, b) => {
+        if (a.seq !== undefined && b.seq !== undefined) {
+          return a.seq - b.seq
+        }
+        if (a.seq !== undefined) return -1
+        if (b.seq !== undefined) return 1
+        return a.created < b.created ? -1 : a.created > b.created ? 1 : 0
+      })
       const pinned: ResolvedPin[] = []
       const orphaned: CommentRec[] = []
       for (const comment of ordered) {

@@ -169,6 +169,7 @@ describe('useCommentsStore', () => {
         body: 'Make it pop',
       })
       expect(store.items).toContainEqual(saved)
+      expect(store.items.find((c) => c.id === 'c-new')?.seq).toBe(undefined)
       expect(store.pendingAnchor).toBeNull()
       expect(store.mode).toBe('off')
       expect(store.loading).toBe(false)
@@ -240,15 +241,17 @@ describe('useCommentsStore', () => {
       setBackend(makeMockBackend())
       const store = useCommentsStore()
 
-      store.upsertFromRealtime(rec({ id: 'c1', body: 'v1' }))
+      store.upsertFromRealtime(rec({ id: 'c1', seq: 1, body: 'v1' }))
       expect(store.items).toHaveLength(1)
+      expect(store.items[0].seq).toBe(1)
 
-      store.upsertFromRealtime(rec({ id: 'c1', body: 'v2' }))
+      store.upsertFromRealtime(rec({ id: 'c1', seq: 1, body: 'v2' }))
       expect(store.items).toHaveLength(1)
       expect(store.items[0].body).toBe('v2')
 
-      store.upsertFromRealtime(rec({ id: 'c2' }))
+      store.upsertFromRealtime(rec({ id: 'c2', seq: 2 }))
       expect(store.items.map((c) => c.id)).toEqual(['c1', 'c2'])
+      expect(store.items[1].seq).toBe(2)
     })
 
     it('removeFromRealtime drops by id and tolerates unknown ids', () => {

@@ -81,10 +81,10 @@ function pinStyle(id: string): Record<string, string> {
       class="c11n-pin"
       type="button"
       :style="pinStyle(comment.id)"
-      :aria-label="`Open comment thread ${i + 1}`"
+      :aria-label="`Open comment thread ${comment.seq ?? i + 1}`"
       @click="store.openThread(comment.id)"
     >
-      {{ i + 1 }}
+      {{ comment.seq ?? i + 1 }}
     </button>
   </div>
 </template>

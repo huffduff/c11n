@@ -174,7 +174,10 @@ function flash(c: CommentRec) {
           type="button"
           @click="onRowClick(c)"
         >
-          <span class="c11n-sidebar-row-body">{{ truncate(c.body) }}</span>
+          <span class="c11n-sidebar-row-body">
+            <span v-if="c.seq" class="c11n-sidebar-row-seq">#{{ c.seq }}</span>
+            {{ truncate(c.body) }}
+          </span>
           <span class="c11n-sidebar-row-meta">
             <span class="c11n-sidebar-row-author">{{ displayName(c.authorName) }}</span>
             <span class="c11n-sidebar-row-date">{{ displayDate(c.created) }}</span>

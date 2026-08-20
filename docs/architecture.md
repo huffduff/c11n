@@ -48,7 +48,7 @@ Collections:
 | Collection | Fields | Notes |
 |---|---|---|
 | `projects` | name, slug (unique), upstream | one row per reviewed site; v1 seeds `default` |
-| `comments` | project→projects, path, selector, anchorMeta (json), body, author→users, resolved | thread roots, anchored to a DOM element on a normalized path |
+| `comments` | project→projects, seq (number), path, selector, anchorMeta (json), body, author→users, resolved | thread roots, anchored to a DOM element on a normalized path with persistent sequence numbers |
 | `replies` | comment→comments (cascade), body, author→users | flat replies; no nesting (YAGNI) |
 
 API rules: authenticated users can list/view/create; authors edit their own;

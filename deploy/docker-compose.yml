@@ -31,6 +31,8 @@ services:
     build: ./pocketbase
     volumes:
       - pb_data:/pb/pb_data
+      - ./pocketbase/pb_migrations:/pb/pb_migrations:ro
+      - ./pocketbase/pb_hooks:/pb/pb_hooks:ro
     ports:
       # admin UI only; the API is same-origin via caddy at /__c11n/pb/
       - "8090:8090"

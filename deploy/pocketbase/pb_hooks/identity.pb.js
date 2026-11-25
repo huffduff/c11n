@@ -264,6 +264,35 @@ routerAdd("POST", "/api/c11n/auth/claim", (e) => {
   // the status, so a script can tell a spent link from a malformed request.
   const fail = (message) => e.json(410, { message: message })
 
+  // CSRF (ADR 0006, revised): the claim is a state-changing POST, so it must
+  // only accept a request the sign-in page itself made.
+  //   1. Content-Type must be application/json. A cross-site <form> can only
+  //      send urlencoded/plain/multipart, and setting a JSON type from script
+  //      needs a CORS preflight this route never grants.
+  //   2. Origin must be this deployment's own origin, or Sec-Fetch-Site must
+  //      say same-origin. Both are browser-controlled; a request with neither
+  //      (curl, a server-side GET-forger) is refused.
+  // The public origin is C11N_PUBLIC_URL when set (the same value the invite
+  // link is built from); otherwise the Host this request arrived with, behind
+  // Caddy / the ingress.
+  const contentType = String(e.request.header.get("Content-Type") || "").toLowerCase()
+  if (contentType.indexOf("application/json") !== 0) {
+    return e.json(415, { message: "claim requires application/json" })
+  }
+  const host = String(e.request.header.get("Host") || "")
+  let scheme = e.isTLS() ? "https" : "http"
+  const forwardedProto = String(e.request.header.get("X-Forwarded-Proto") || "")
+  if (forwardedProto) {
+    scheme = forwardedProto.split(",")[0].trim()
+  }
+  const publicUrl = $os.getenv("C11N_PUBLIC_URL") || ""
+  const publicOrigin = publicUrl ? publicUrl.replace(/\/+$/, "") : scheme + "://" + host
+  const origin = String(e.request.header.get("Origin") || "")
+  const fetchSite = String(e.request.header.get("Sec-Fetch-Site") || "")
+  if (!(origin && origin === publicOrigin) && fetchSite !== "same-origin") {
+    return e.json(403, { message: "cross-origin claim refused" })
+  }
+
   let body = {}
   try {
     body = e.requestInfo().body || {}

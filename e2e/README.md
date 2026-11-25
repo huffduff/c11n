@@ -64,13 +64,17 @@ resolution and would break.
 ## Identity specs (Phase 3)
 
 `specs/identity.spec.ts` covers the backend half of ADR 0006/0008: the
-bootstrap owner (3.2), `POST /api/c11n/invite` (3.3), the magic-link callback
+bootstrap owner (3.2), `POST /api/c11n/invite` (3.3), the magic-link claim
 (3.4), `session`/`me`/`logout` (3.6) and password auth being off (3.9).
+`specs/token-logs.spec.ts` proves no raw token reaches `_logs`,
+`specs/claim-csrf.spec.ts` covers unfurlers and cross-origin claims, and
+`specs/next-redirect.spec.ts` proves `next` cannot leave the origin.
 
 Where those routes are reachable from has changed with the gate (3.8):
 
-- `/__c11n/auth/magic` and `/__c11n/auth/logout` are **public**; the specs use
-  the invite links as returned, through the proxy.
+- `/__c11n/auth/` (the sign-in / "Continue" page) and `/__c11n/auth/claim` are
+  **public**; the dogfood specs use the invite links as returned, through the
+  proxy. `/__c11n/auth/magic` is the legacy GET path and is inert.
 - `/api/c11n/session`, `/api/c11n/me`, `/api/c11n/invite` and the collections
   are **pod-internal** now. Fixtures and API-level specs call PocketBase on its
   own port (`pbUrl` in `.stack/creds.json`): a bearer sent through the proxy is
@@ -84,8 +88,13 @@ flow in one run (owner → team → client → comment → resolve).
 
 Sign-in helpers, all in `fixtures.ts`:
 
-- `signInAs(page, email?, role?)` — mints a magic link as superuser and opens
-  it through the proxy, then waits for the authed toolbar.
+- `signInAs(page, email?, role?)` — mints a magic link as superuser, opens it
+  through the proxy, clicks "Continue to review", then waits for the authed
+  toolbar.
+- `openMagicLinkInPage(page, link, next?)` — the fragment-link browser flow,
+  without minting.
+- `claimInvite(request, link, opts?)` — the same POST the page makes, without a
+  browser (`opts.origin` / `opts.contentType` for the CSRF specs).
 - `sessionCookie(email, role?)` — the `c11n_session=…` header for API specs.
 - `userToken(email)` — a bearer via the superuser impersonate endpoint.
 - `bootstrapInviteLink()` — the owner's one-time link from the log.

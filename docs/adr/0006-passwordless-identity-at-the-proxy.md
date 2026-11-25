@@ -4,6 +4,13 @@
 are fine as long as user identity is secure. Open to suggestions for best
 UX/DX." This ADR was the suggestion, and Tom accepted it.
 
+**Revised 2026-11-25 (security review).** Three changes, all in the claim path:
+the link TTL is 72 h (not 15 min) because the MVP is copy-the-link; the token
+lives in the URL **fragment** and is claimed by a same-origin **POST**, so link
+unfurlers, request logs and `Referer` never see it; and the claim endpoint
+requires `Content-Type: application/json` plus a same-origin `Origin` /
+`Sec-Fetch-Site`. Status stays Accepted.
+
 **MVP scope (Tom, 2026-11-25): copy-the-link only.**
 - `POST /api/c11n/invite` always returns the link. The inviter passes it on
   through Slack, email or similar.
@@ -31,9 +38,10 @@ UX/DX." This ADR was the suggestion, and Tom accepted it.
    ("Invite" in the sidebar) or with the CLI (`c11n invite <email> --role
    client`).
 2. The invitee gets an email with a link to
-   `https://<review-host>/__c11n/auth/magic?t=<token>`.
-3. Clicking the link signs them in and drops them on the page they were
-   invited to. There is no password and no form.
+   `https://<review-host>/__c11n/auth/#t=<token>`.
+3. Clicking the link opens a one-button "Continue to review" page; the click
+   signs them in and drops them on the page they were invited to. There is no
+   password and no form, and a plain GET of the link never signs anyone in.
 4. When a session expires, any request shows a branded c11n sign-in page.
    The user enters their email and gets a new link, but **only if they
    were invited**. Unknown emails get the same "check your inbox" response
@@ -51,14 +59,29 @@ UX/DX." This ADR was the suggestion, and Tom accepted it.
   link** so the inviter can pass it on through Slack or similar.
 - **Public auth paths** all sit under `/__c11n/auth/`. That prefix is the
   only one exempt from the gate:
-  - `/__c11n/auth/` is the static sign-in page.
-  - Caddy rewrites `/__c11n/auth/{magic,request,logout}` to the PocketBase
-    hook routes `/api/c11n/auth/{magic,request,logout}`.
-- `GET /__c11n/auth/magic?t=…` checks the token hash, the
-  expiry (15 min, single use) and the user. It then issues a PocketBase auth
-  token and sets **`c11n_session`**: `HttpOnly; Secure; SameSite=Lax;
-  Path=/`, lifetime 14 days. Finally it 302s to the `next` path, which must
-  be a same-origin path.
+  - `/__c11n/auth/` is the static sign-in page (also the "Continue" page).
+  - Caddy rewrites `/__c11n/auth/{claim,request,logout}` to the PocketBase
+    hook routes `/api/c11n/auth/{claim,request,logout}`. The old
+    `/__c11n/auth/magic` path still exists but never claims: it 302s to the
+    sign-in page with `reason=legacy`, so links minted before this revision
+    fail closed and an unfurler cannot spend them.
+- `POST /__c11n/auth/claim` takes `{t, next}` as JSON, checks the token hash,
+  the expiry (72 h, `C11N_LINK_TTL_HOURS`, single use) and the user. It then
+  issues a PocketBase auth token, sets **`c11n_session`**: `HttpOnly; Secure;
+  SameSite=Lax; Path=/`, lifetime 14 days (`C11N_SESSION_TTL_DAYS`), and
+  answers `{redirect: "<same-origin path>"}`; the page navigates there.
+  `next` must be a same-origin path (no control characters, no backslash,
+  exactly one leading `/`, ≤ 2048 bytes).
+- **Why a fragment and a POST (2026-11-25).** A fragment is never sent to a
+  server, so the token cannot land in PocketBase's request log or in the
+  `Referer` of the next page. And GET is not a safe verb for a single-use
+  action: Slackbot, Outlook Safe Links and similar unfurlers GET every pasted
+  link, which under the old design burned the invite before the human clicked
+  it. The GET now only serves the page; the claim is the POST the button makes.
+  CSRF is closed by requiring `Content-Type: application/json` (a cross-site
+  form cannot send it, and scripted cross-origin JSON needs a CORS preflight)
+  and `Origin` equal to the deployment's public origin, or
+  `Sec-Fetch-Site: same-origin`.
 - `POST /__c11n/auth/request` serves the "send me a new link" form,
   rate-limited per email and per IP. This is post-MVP; it needs SMTP.
 - `GET /api/c11n/session` is the `forward_auth` target. Caddy calls it on
@@ -101,5 +124,9 @@ scripts can read it. The proxy-held httpOnly cookie is what makes identity
   run.
 - SMTP is needed for the best UX. The copy-the-link fallback keeps it
   optional.
+- Because the link is copied by hand, its TTL is 72 h rather than 15 min. A
+  copied link is therefore a 72-hour bearer for one sign-in; re-inviting the
+  same user revokes the older unused links, and logout revokes every session
+  token for that user (`tokenKey` rotation).
 - The PocketBase admin UI (`/_/`) must not be exposed through the review
   host. Reach it with port-forward, or on a separate, restricted ingress.

@@ -6,9 +6,11 @@ the ADR wins. Current state and known bugs:
 [`docs/assessment/2026-11-25-state-of-the-repo.md`](assessment/2026-11-25-state-of-the-repo.md)._
 
 > **Pending changes:**
-> - Identity is moving from email/password to proxy-enforced magic links
->   (ADR 0006, accepted; not built yet).
-> - Roles are being introduced (ADR 0008, accepted; not built yet).
+> - Identity is proxy-enforced magic links: an invite link sets an httpOnly
+>   cookie, Caddy gates every route on it, and password auth is off
+>   (ADR 0006; built in Phase 3).
+> - Roles (owner/team/client/agent) are on `users`; the permission matrix
+>   itself is Phase 3 task 3.10 (ADR 0008).
 > - Production hosting is one Helm release per site; compose is for dev
 >   only (ADR 0005).
 
@@ -49,9 +51,10 @@ in proxied HTML responses. No custom Caddy plugin code.
 
 ### 2. PocketBase (backend, v1)
 
-One binary provides email/password auth, SQLite storage, admin UI, and
-realtime SSE subscriptions. Schema lives as JS migrations in
-`deploy/pocketbase/pb_migrations/` (schema-as-code).
+One binary provides SQLite storage, admin UI, realtime SSE subscriptions and
+JS hooks — including the identity hooks in `pb_hooks/identity.pb.js` that mint
+magic-link sessions. Password auth on `users` is off. Schema lives as JS
+migrations in `deploy/pocketbase/pb_migrations/` (schema-as-code).
 
 Collections:
 

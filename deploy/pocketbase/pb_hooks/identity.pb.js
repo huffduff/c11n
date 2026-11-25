@@ -172,23 +172,22 @@ routerAdd("POST", "/api/c11n/invite", (e) => {
 // the link is spent — the safer failure: a retry costs the user one more link,
 // while the reverse order would leave a window where a token works twice.
 routerAdd("GET", "/api/c11n/auth/magic", (e) => {
-  const page = (status) => {
-    e.html(
-      status,
-      '<!doctype html><html lang="en"><head><meta charset="utf-8">' +
-        '<meta name="viewport" content="width=device-width,initial-scale=1">' +
-        "<title>c11n — link no longer works</title>" +
-        "<style>body{margin:0;min-height:100vh;display:grid;place-items:center;background:#111;color:#eee;" +
-        "font:16px/1.5 system-ui,sans-serif}main{max-width:32rem;padding:2rem}h1{font-size:1.25rem;margin:0 0 .75rem}" +
-        "p{margin:0;color:#bbb}</style></head><body><main><h1>This link no longer works</h1>" +
-        "<p>This link has expired or was already used. Ask your project contact for a new one.</p>" +
-        "</main></body></html>"
-    )
+  // Every failure is the same answer for the user: the static sign-in page
+  // (3.7) with reason=invalid. The URL is the contract; X-C11n-Error keeps the
+  // class machine-readable for scripts and specs, which is all the old inline
+  // page's status codes (404 unknown / 410 spent) ever bought.
+  //
+  // A redirect rather than an error page on purpose: the sign-in page is the
+  // one screen that tells the user what to do next ("ask your project contact
+  // for a new link"), and it must not be duplicated in a hook.
+  const page = () => {
+    e.response.header().set("X-C11n-Error", "invalid")
+    return e.redirect(302, "/__c11n/auth/?reason=invalid")
   }
 
   const rawToken = (e.request.url.query().get("t") || "").trim()
   if (!rawToken) {
-    return page(404)
+    return page()
   }
 
   let invite = null
@@ -200,13 +199,13 @@ routerAdd("GET", "/api/c11n/auth/magic", (e) => {
     invite = null
   }
   if (!invite) {
-    return page(404)
+    return page()
   }
 
   const usedAt = String(invite.get("usedAt") || "")
   const expiresAtMs = new Date(invite.get("expiresAt")).getTime()
   if (usedAt || !(expiresAtMs > Date.now())) {
-    return page(410)
+    return page()
   }
 
   const claimed = e.app
@@ -216,7 +215,7 @@ routerAdd("GET", "/api/c11n/auth/magic", (e) => {
     .execute()
   if (claimed.rowsAffected() !== 1) {
     // Someone else won the race between the read above and this write.
-    return page(410)
+    return page()
   }
 
   let user = null
@@ -226,7 +225,7 @@ routerAdd("GET", "/api/c11n/auth/magic", (e) => {
     user = null
   }
   if (!user) {
-    return page(410)
+    return page()
   }
 
   // Session token: a real PocketBase auth token for the user, minted
@@ -317,7 +316,7 @@ routerAdd("GET", "/api/c11n/session", (e) => {
     const rawQuery = String(e.request.url.rawQuery || "")
     originalUri = e.request.url.path + (rawQuery ? "?" + rawQuery : "")
   }
-  return e.redirect(302, "/__c11n/auth/?next=" + encodeURIComponent(originalUri))
+  return e.redirect(302, "/__c11n/auth/?reason=expired&next=" + encodeURIComponent(originalUri))
 })
 
 routerAdd("GET", "/api/c11n/me", (e) => {

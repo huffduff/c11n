@@ -301,8 +301,12 @@ test.describe('3.4 magic-link callback', () => {
     expect(rows[0].usedAt).not.toBe('')
 
     const reused = await openMagicLink(request, hookUrl(invite.link))
-    expect(reused.status).toBe(410)
-    expect(reused.body).toContain('This link has expired or was already used.')
+    // 3.7: a dead link is no longer an inline error page. It is a redirect to
+    // the static sign-in page with reason=invalid; the error class travels in
+    // a header so a script (and the spec) can still tell it apart.
+    expect(reused.status).toBe(302)
+    expect(reused.location).toBe('/__c11n/auth/?reason=invalid')
+    expect(reused.errorHeader).toBe('invalid')
     expect(reused.setCookie).toBeUndefined()
   })
 
@@ -311,23 +315,24 @@ test.describe('3.4 magic-link callback', () => {
     const url = hookUrl(invite.link)
 
     const results = await Promise.all(Array.from({ length: 5 }, () => openMagicLink(request, url)))
-    const statuses = results.map((r) => r.status)
-    expect(statuses.filter((s) => s === 302)).toHaveLength(1)
-    expect(statuses.filter((s) => s === 410)).toHaveLength(4)
-    expect(results.filter((r) => r.setCookie)).toHaveLength(1)
+    expect(results.filter((r) => r.setCookie).length, 'exactly one winner').toBe(1)
+    expect(results.filter((r) => r.setCookie)[0].status).toBe(302)
+    expect(results.filter((r) => r.location === '/__c11n/auth/?reason=invalid')).toHaveLength(4)
 
     const rows = await invitesFor(invite.email)
     expect(rows).toHaveLength(1)
     expect(rows[0].usedAt).not.toBe('')
   })
 
-  test('an expired link is 410 and sets no cookie', async ({ request }) => {
+  test('an expired link redirects to sign-in with reason=invalid and sets no cookie', async ({
+    request,
+  }) => {
     const invite = await freshInvite(request)
     await patchInvite(invite.inviteId, { expiresAt: '2020-01-01 00:00:00.000Z' })
 
     const opened = await openMagicLink(request, hookUrl(invite.link))
-    expect(opened.status).toBe(410)
-    expect(opened.body).toContain('This link has expired or was already used.')
+    expect(opened.status).toBe(302)
+    expect(opened.location).toBe('/__c11n/auth/?reason=invalid')
     expect(opened.setCookie).toBeUndefined()
 
     // An expired link is not silently consumed either.
@@ -335,10 +340,12 @@ test.describe('3.4 magic-link callback', () => {
     expect(rows[0].usedAt).toBe('')
   })
 
-  test('an unknown token is 404 and says nothing else', async ({ request }) => {
+  test('an unknown token redirects to sign-in with reason=invalid and says nothing else', async ({
+    request,
+  }) => {
     const opened = await openMagicLink(request, `${HOOK_MAGIC}?t=${'A'.repeat(43)}`)
-    expect(opened.status).toBe(404)
-    expect(opened.body).toContain('This link has expired or was already used.')
+    expect(opened.status).toBe(302)
+    expect(opened.location).toBe('/__c11n/auth/?reason=invalid')
     expect(opened.setCookie).toBeUndefined()
     // No id, no hash, no email in the body.
     expect(opened.body).not.toContain('invites')
@@ -401,9 +408,12 @@ test.describe('3.6 session, me and logout', () => {
     })
     expect(html.status()).toBe(302)
     const location = html.headers()['location']
-    expect(location.startsWith('/__c11n/auth/?next=')).toBe(true)
-    // The original URI travels as an encoded parameter, not as part of the path.
-    expect(decodeURIComponent(location.slice('/__c11n/auth/?next='.length))).toBe('/some/page?x=1')
+    // 3.5: the reason travels in the URL, so the static page can choose its
+    // copy without a round trip; `next` is kept for the post-MVP email form.
+    expect(location.startsWith('/__c11n/auth/?reason=expired&next=')).toBe(true)
+    expect(decodeURIComponent(location.slice('/__c11n/auth/?reason=expired&next='.length))).toBe(
+      '/some/page?x=1',
+    )
 
     const nonHtml = await request.get('/__c11n/pb/api/c11n/session', { headers: { accept: '*/*' }, maxRedirects: 0 })
     expect(nonHtml.status()).toBe(401)

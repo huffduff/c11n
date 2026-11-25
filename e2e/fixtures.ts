@@ -386,6 +386,8 @@ export interface MagicOpen {
   location?: string
   /** The raw Set-Cookie header, when the response set one. */
   setCookie?: string
+  /** `X-C11n-Error` on a redirect to the sign-in page (task 3.7). */
+  errorHeader?: string
   body: string
 }
 
@@ -400,6 +402,7 @@ export async function openMagicLink(request: APIRequestContext, link: string): P
     status: res.status(),
     location: headers['location'] ?? headers['Location'],
     setCookie: headers['set-cookie'] ?? headers['Set-Cookie'],
+    errorHeader: headers['x-c11n-error'],
     body: await res.text(),
   }
 }

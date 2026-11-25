@@ -17,7 +17,6 @@ import {
  *
  * Specs marked `test.fail()` / `test.fixme()` describe the CORRECT behaviour
  * of a known open bug and stay visible until Phase 2 fixes it:
- *   - B4  (fail, 10/10): a saved comment renders two pins (realtime echo)
  *   - reply echo (fixme, 10/10 in isolation): a UI reply renders twice
  * Each becomes a passing spec the moment its fix lands.
  *
@@ -138,16 +137,16 @@ test.describe('B3 — pins visible on load', () => {
 })
 
 test.describe('B4 — one pin per saved comment', () => {
-  // B4: duplicate pin from realtime echo. Reproduced 10/10 under
-  // --repeat-each=10 (the pin count reaches 2 inside the 2 s poll window).
-  test.fail('saving a comment renders exactly one pin', async ({ page }) => {
+  test('saving a comment renders exactly one pin', async ({ page }) => {
     const user = await createUser(undefined, 'B4 Saver')
     await signedIn(page, user.email, user.name)
 
     await createViaUi(page, 'only once')
 
-    // Poll for the duplicate for 2 s: the realtime create can land before or
-    // after the HTTP response, so a single snapshot is not enough.
+    // Wait for the pin to exist, then make sure it never doubles: the realtime
+    // create can land before or after the HTTP response, so a single snapshot
+    // is not enough.
+    await expect(page.locator('.c11n-pin')).toHaveCount(1)
     const counts = new Set<number>()
     for (let i = 0; i < 20; i++) {
       counts.add(await page.locator('.c11n-pin').count())

@@ -144,7 +144,10 @@ export const useCommentsStore = defineStore('comments', {
           anchorMeta: this.pendingAnchor.meta,
           body,
         })
-        this.items.push(rec)
+        // Same identity as the realtime echo (B4): whichever lands second is
+        // an update, not a second record — two entries render two pins.
+        this.upsertFromRealtime(rec)
+        this.upsertSidebarComment(rec)
         this.pendingAnchor = null
         this.mode = 'off'
       } catch {
@@ -164,6 +167,13 @@ export const useCommentsStore = defineStore('comments', {
 
     removeFromRealtime(id: string) {
       this.items = this.items.filter((c) => c.id !== id)
+    },
+
+    /** Project-wide list: upsert by id, so echoes never duplicate a row. */
+    upsertSidebarComment(rec: CommentRec) {
+      const i = this.sidebarComments.findIndex((c) => c.id === rec.id)
+      if (i === -1) this.sidebarComments.push(rec)
+      else this.sidebarComments[i] = rec
     },
 
     // ------------------------------------------------------------------
@@ -223,16 +233,10 @@ export const useCommentsStore = defineStore('comments', {
         return rec
       }
 
-      const upsertSidebar = (rec: CommentRec) => {
-        const i = this.sidebarComments.findIndex((c) => c.id === rec.id)
-        if (i === -1) this.sidebarComments.push(rec)
-        else this.sidebarComments[i] = rec
-      }
-
       const onCommentUpsert = (rec: CommentRec) => {
         const filled = backfill(rec)
         this.upsertFromRealtime(filled)
-        upsertSidebar(filled)
+        this.upsertSidebarComment(filled)
       }
 
       this._unsubRealtime = backend.subscribe(PROJECT, {

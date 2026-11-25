@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { createPinia, setActivePinia } from 'pinia'
 import { setBackend } from '../src/lib/backend'
-import type { C11nBackend, CommentRec, ReplyRec } from '../src/lib/api'
+import type { C11nBackend, CommentRec, RealtimeHandlers, ReplyRec } from '../src/lib/api'
 import type { Anchor } from '../src/lib/anchor'
 import { PROJECT } from '../src/lib/project'
 import { useCommentsStore } from '../src/stores/comments'
@@ -203,6 +203,50 @@ describe('useCommentsStore', () => {
       await store.saveComment('orphan text')
 
       expect(mock.createComment).not.toHaveBeenCalled()
+    })
+
+    // B4: the realtime create echo can beat the HTTP response. Both paths
+    // must agree on identity, or the pin (and the sidebar row) renders twice.
+    it('keeps one item when the realtime echo lands before createComment resolves', async () => {
+      const saved = rec({ id: 'c-new', body: 'Make it pop' })
+      let handlers: RealtimeHandlers = {}
+      const mock = makeMockBackend({
+        subscribe: vi.fn((_project: string, h: RealtimeHandlers) => {
+          handlers = h
+          return () => {}
+        }),
+        createComment: vi.fn(async () => {
+          handlers.onCommentCreate!(saved) // echo arrives first
+          return saved
+        }),
+      })
+      setBackend(mock)
+      const store = useCommentsStore()
+      store.startRealtime()
+      await store.setPath('/pricing')
+      store.enterPickMode()
+      store.beginCompose(anchor)
+
+      await store.saveComment('Make it pop')
+
+      expect(store.items.filter((c) => c.id === 'c-new')).toHaveLength(1)
+      expect(store.items.map((c) => c.id)).toEqual(['c-new'])
+      expect(store.sidebarComments.filter((c) => c.id === 'c-new')).toHaveLength(1)
+    })
+
+    it('upserts the saved comment into the sidebar list by id', async () => {
+      const saved = rec({ id: 'c-new', body: 'Make it pop' })
+      setBackend(makeMockBackend({ createComment: vi.fn().mockResolvedValue(saved) }))
+      const store = useCommentsStore()
+      await store.setPath('/pricing')
+      store.sidebarComments = [rec({ id: 'c-old' }), saved]
+      store.enterPickMode()
+      store.beginCompose(anchor)
+
+      await store.saveComment('Make it pop')
+
+      // Existing row updated in place, never appended a second time.
+      expect(store.sidebarComments.map((c) => c.id)).toEqual(['c-old', 'c-new'])
     })
   })
 

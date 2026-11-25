@@ -115,6 +115,13 @@ jobs:
       - name: Fetch pinned native tools
         run: scripts/fetch-tools.sh
 
+      # Boots a scratch PocketBase with the migrations and an EMPTY hooks dir
+      # (port 28095) to prove `comments.updateRule` alone still blocks
+      # author/project/seq for non-authors. Cheap enough to run once per
+      # fixture, which is where the pinned binary already is.
+      - name: Rule floor without hooks
+        run: node scripts/check-rule-floor.mjs
+
       - name: Install dependencies
         run: npm ci
 

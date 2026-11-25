@@ -52,7 +52,11 @@ test.describe('S2 — immutable fields on comments', () => {
     const bobToken = await userToken(bob.email)
 
     const res = await patch(request, `${PB}/api/collections/comments/records/${comment.id}`, { seq: 99 }, bobToken)
-    expect(res.status(), await res.text()).toBe(400)
+    // 404, not 400: the non-author branch of `comments.updateRule` now requires
+    // author/project/seq to be unset (1764000300), so the rule denies the PATCH
+    // before the immutability hook is reached (the hook answers 400 for the
+    // cases the rule lets through — an author changing seq).
+    expect(res.status(), await res.text()).toBe(404)
 
     const stored = (await listComments()).find((c) => c.id === comment.id)
     expect(stored?.seq).toBe(comment.seq)

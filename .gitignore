@@ -29,3 +29,6 @@ logs/
 # OS
 .DS_Store
 Thumbs.db
+
+# Local native stack state (scripts/stack.sh)
+.stack/

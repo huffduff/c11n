@@ -20,7 +20,40 @@
 //  - `record.newStaticAuthToken(n)` takes a Go time.Duration, i.e. NANOseconds:
 //    `newStaticAuthToken(60)` is a token that expired 60ns after minting, and
 //    `findAuthRecordByToken` rejects it with "token is expired".
+//  - `URL` does NOT exist in the JSVM (`ReferenceError: URL is not defined`,
+//    verified here), so "is this the same origin?" has to be spelled out with
+//    string checks. See safeNext below.
+//  - A function stored in `$app.store()` IS callable from a handler later
+//    (verified), while a top-level `const fn = () => {}` is not. That is how
+//    the one copy of safeNext is shared instead of duplicated per handler.
 
+// ---- I2: one shared "is this a same-origin path?" validator ----------------
+// The old check looked for `//`, a backslash and `://`, which let
+// `next=/%09//evil` through: the hook 302s to a Location holding a literal TAB
+// and Chromium strips tabs while parsing, so the browser lands on `//evil`.
+// CR, LF and NUL behave the same way; a backslash is normalised to `/` by the
+// WHATWG parser (`/\evil` -> `//evil`).
+//
+// Rules, in order: at most 2048 bytes; no C0 control characters or DEL; no
+// backslash; starts with exactly one `/` (so no protocol-relative `//`, and no
+// absolute URL, which would not start with `/` at all). That is the same set
+// `new URL(raw, "https://x.invalid").origin === "https://x.invalid"` accepts
+// for a server-side redirect target.
+//
+// Returning null means "unsafe": callers drop `next` (or fall back to "/")
+// rather than redirecting somewhere unvetted.
+const safeNext = (raw) => {
+  const value = String(raw || "")
+  if (!value || value.length > 2048) return null
+  if (/[\x00-\x1f\x7f]/.test(value)) return null
+  if (value.indexOf("\\") !== -1) return null
+  if (value.charAt(0) !== "/") return null
+  if (value.charAt(1) === "/") return null
+  return value
+}
+$app.store().set("c11n_safe_next", safeNext)
+
+// ---- C1: a user cannot change their own privileged fields -----------------
 onRecordUpdateRequest((e) => {
   // Superuser is the repair path (the invite route is a hook, not a request,
   // so it is unaffected by this: hook-driven saves do not fire request hooks).
@@ -291,13 +324,20 @@ routerAdd("GET", "/api/c11n/auth/magic", (e) => {
     })
   )
 
-  // `next` is only ever a same-origin path. Absolute URLs, protocol-relative
-  // URLs, backslash tricks (browsers treat /\evil as //evil) and schemes all
-  // fall back to "/".
+  // `next` is only ever a same-origin path (I2). The one validator lives in
+  // the app store because a top-level function is not in scope here; a missing
+  // or non-callable value fails closed to "/".
   const rawNext = e.request.url.query().get("next") || ""
-  const sameOriginPath =
-    rawNext.charAt(0) === "/" && rawNext.charAt(1) !== "/" && rawNext.indexOf("\\") === -1 && rawNext.indexOf("://") === -1
-  return e.redirect(302, sameOriginPath ? rawNext : "/")
+  let next = "/"
+  try {
+    const validate = $app.store().get("c11n_safe_next")
+    if (typeof validate === "function") {
+      next = validate(rawNext) || "/"
+    }
+  } catch (err) {
+    next = "/"
+  }
+  return e.redirect(302, next)
 })
 
 // ---- 3.6: session, me and logout ------------------------------------------
@@ -355,7 +395,22 @@ routerAdd("GET", "/api/c11n/session", (e) => {
     const rawQuery = String(e.request.url.rawQuery || "")
     originalUri = e.request.url.path + (rawQuery ? "?" + rawQuery : "")
   }
-  return e.redirect(302, "/__c11n/auth/?reason=expired&next=" + encodeURIComponent(originalUri))
+  // I2: the URI is attacker-influenced (it is whatever path the browser asked
+  // for), so it goes through the same validator as `next` on the magic route.
+  // An unsafe value is DROPPED rather than redirected to.
+  let safeOriginal = null
+  try {
+    const validate = $app.store().get("c11n_safe_next")
+    if (typeof validate === "function") {
+      safeOriginal = validate(originalUri)
+    }
+  } catch (err) {
+    safeOriginal = null
+  }
+  return e.redirect(
+    302,
+    "/__c11n/auth/?reason=expired" + (safeOriginal ? "&next=" + encodeURIComponent(safeOriginal) : "")
+  )
 })
 
 routerAdd("GET", "/api/c11n/me", (e) => {

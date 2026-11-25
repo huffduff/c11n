@@ -1,7 +1,19 @@
 {
 	order replace after encode
+
+	# No admin API. Caddy's default admin endpoint (localhost:2019) is
+	# unauthenticated and address-global, so two instances on one host (a
+	# second stack, a dev caddy) would clobber each other's config. Config
+	# changes are applied by restarting instead: k8s rolls the pod, and
+	# scripts/stack.sh down && up restarts the local stack.
+	admin off
 }
 
+# Environment values are substituted literally. Caddy's {$VAR:default} uses the
+# default only when the variable is UNSET, so an empty value
+# (C11N_UPSTREAM_TLS="") counts as set and breaks config load with
+# "File to import not found: upstream_tls_". Leave optional variables unset
+# rather than empty; stack.sh and compose always pass a real value.
 # Upstream TLS handling, selected by $C11N_UPSTREAM_TLS (default: verify).
 # "insecure" is opt-in only, for https upstreams with a self-signed cert
 # (e.g. a local vite dev server). Caddy rejects it for plain-http upstreams,

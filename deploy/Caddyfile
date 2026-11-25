@@ -2,10 +2,23 @@
 	order replace after encode
 }
 
-:8080 {
+# Upstream TLS handling, selected by $C11N_UPSTREAM_TLS (default: verify).
+# "insecure" is opt-in only, for https upstreams with a self-signed cert
+# (e.g. a local vite dev server). Caddy rejects it for plain-http upstreams,
+# so leave it unset (or "verify") unless your upstream speaks https with a
+# certificate the proxy cannot validate.
+(upstream_tls_verify) {
+}
+(upstream_tls_insecure) {
+	transport http {
+		tls_insecure_skip_verify
+	}
+}
+
+{$C11N_LISTEN::8080} {
 	# PocketBase API + realtime, same-origin under /__c11n/pb/
 	handle_path /__c11n/pb/* {
-		reverse_proxy pocketbase:8090 {
+		reverse_proxy {$C11N_PB_ADDR:pocketbase:8090} {
 			# SSE: stream responses immediately
 			flush_interval -1
 		}
@@ -13,7 +26,7 @@
 
 	# Overlay bundle
 	handle_path /__c11n/* {
-		root * /srv/overlay
+		root * {$C11N_OVERLAY_DIR:/srv/overlay}
 		file_server
 	}
 
@@ -22,11 +35,7 @@
 		reverse_proxy {$C11N_UPSTREAM:http://demo:5173} {
 			# don't let upstream compress; replace needs plaintext
 			header_up Accept-Encoding identity
-			# allow https upstreams with self-signed certs (e.g. a local
-			# vite dev server); harmless for plain-http upstreams
-			transport http {
-				tls_insecure_skip_verify
-			}
+			import upstream_tls_{$C11N_UPSTREAM_TLS:verify}
 			# staging-review tradeoff: strip CSP so the injected script runs
 			header_down -Content-Security-Policy
 		}

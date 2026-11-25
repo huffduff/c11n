@@ -11,7 +11,8 @@
 # Later scripts locate the binaries through scripts/tools-lib.sh, which
 # implements the same resolution: ${CADDY_BIN:-<repo>/.tools/caddy}.
 #
-# Versions live in scripts/tools.env. Requires bash, go (for Caddy only),
+# Versions live in scripts/tools.env (including the pinned xcaddy used to
+# build Caddy). Requires bash, go (for Caddy only - pinned in .tool-versions),
 # curl and either unzip or python3.
 set -euo pipefail
 
@@ -30,14 +31,33 @@ die() {
 
 mkdir -p "$TOOLS_DIR"
 
+# --- platform ---------------------------------------------------------------
+# Fail on an unsupported arch before the (slow) Caddy build, not after it, when
+# the PocketBase download would be the thing that cannot work.
+ARCH="$(uname -m)"
+HOST_UNSUPPORTED=""
+case "$ARCH" in
+x86_64 | amd64) ;;
+*) HOST_UNSUPPORTED="the prebuilt PocketBase zip is linux_amd64 only; this host is $(uname -s)/$ARCH. Set POCKETBASE_BIN=/path/to/pocketbase (a local build) to continue" ;;
+esac
+if [ -n "$HOST_UNSUPPORTED" ] && [ -z "${POCKETBASE_BIN:-}" ]; then
+	die "$HOST_UNSUPPORTED"
+fi
+
 # --- Caddy (with caddyserver/replace-response) -------------------------------
 if [ -n "${CADDY_BIN:-}" ]; then
 	[ -x "$CADDY_BIN" ] || die "CADDY_BIN=$CADDY_BIN is not executable"
 	log "caddy: using CADDY_BIN=$CADDY_BIN (skipping build)"
+elif [ -x "$TOOLS_DIR/caddy" ] &&
+	"$TOOLS_DIR/caddy" version 2>/dev/null | head -n1 | grep -qF "$CADDY_VERSION" &&
+	"$TOOLS_DIR/caddy" list-modules 2>/dev/null | grep -q 'http.handlers.replace_response'; then
+	# Idempotent: re-running must not spend minutes rebuilding the same binary.
+	log "caddy: $TOOLS_DIR/caddy is already $CADDY_VERSION with replace-response (skipping build)"
 else
-	command -v go >/dev/null 2>&1 || die "go is required to build Caddy (set CADDY_BIN to skip)"
-	log "caddy: building $CADDY_VERSION with replace-response@$REPLACE_RESPONSE_REF"
-	go run github.com/caddyserver/xcaddy/cmd/xcaddy@latest build "$CADDY_VERSION" \
+	go version >/dev/null 2>&1 ||
+		die "go is required to build Caddy (found no working 'go'; see .tool-versions and 'asdf install'). Set CADDY_BIN to skip the build"
+	log "caddy: building $CADDY_VERSION with replace-response@$REPLACE_RESPONSE_REF (xcaddy $XCADDY_VERSION)"
+	go run "github.com/caddyserver/xcaddy/cmd/xcaddy@$XCADDY_VERSION" build "$CADDY_VERSION" \
 		--with "github.com/caddyserver/replace-response@$REPLACE_RESPONSE_REF" \
 		--output "$TOOLS_DIR/caddy"
 	chmod +x "$TOOLS_DIR/caddy"
@@ -55,7 +75,7 @@ if [ -n "${POCKETBASE_BIN:-}" ]; then
 	log "pocketbase: using POCKETBASE_BIN=$POCKETBASE_BIN (skipping download)"
 else
 	[ "$(uname -s)" = "Linux" ] || die "prebuilt PocketBase download is Linux-only (set POCKETBASE_BIN)"
-	[ "$(uname -m)" = "x86_64" ] || die "prebuilt PocketBase download is linux_amd64 (set POCKETBASE_BIN)"
+	[ -z "$HOST_UNSUPPORTED" ] || die "$HOST_UNSUPPORTED"
 
 	zip_name="pocketbase_${POCKETBASE_VERSION}_linux_amd64.zip"
 	zip_url="https://github.com/pocketbase/pocketbase/releases/download/v${POCKETBASE_VERSION}/${zip_name}"

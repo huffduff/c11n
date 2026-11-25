@@ -214,6 +214,34 @@ export async function listReplies(commentId: string): Promise<PbReply[]> {
   return body.items
 }
 
+/** Insert a reply directly (superuser), for API-level permission specs. */
+export async function seedReply(commentId: string, author: string, body = 'seeded reply'): Promise<PbReply> {
+  const creds = readCreds()
+  const res = await (await ctx()).post(`${creds.pbUrl}/api/collections/replies/records`, {
+    headers: { authorization: await superuserTokenFor() },
+    data: { comment: commentId, author, body },
+  })
+  return json<PbReply>(res)
+}
+
+/** Create a project as superuser; `projects` is superuser-write (v1). */
+export async function createProject(slug: string, name = slug): Promise<{ id: string; slug: string }> {
+  const creds = readCreds()
+  const res = await (await ctx()).post(`${creds.pbUrl}/api/collections/projects/records`, {
+    headers: { authorization: await superuserTokenFor() },
+    data: { name, slug },
+  })
+  return json<{ id: string; slug: string }>(res)
+}
+
+/** Delete a project as superuser (used by specs that create throwaways). */
+export async function deleteProject(id: string): Promise<void> {
+  const creds = readCreds()
+  await (await ctx()).delete(`${creds.pbUrl}/api/collections/projects/records/${id}`, {
+    headers: { authorization: await superuserTokenFor() },
+  })
+}
+
 /**
  * Sign in through the overlay's own UI: chip → email/password → submit, then
  * wait for the authed toolbar. Deliberately drives the real form (not

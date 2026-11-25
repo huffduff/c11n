@@ -392,7 +392,7 @@ describe('subscribe', () => {
     return { backend, pb, handlers, unsubscribe, commentCb, replyCb }
   }
 
-  it('subscribes to both collections, scoping comments to the resolved project id', async () => {
+  it('scopes both collections to the resolved project id (S3: replies via the comment relation)', async () => {
     const { pb } = await wire()
 
     expect(pb.collection('comments').subscribe).toHaveBeenCalledWith(
@@ -400,7 +400,14 @@ describe('subscribe', () => {
       expect.any(Function),
       { filter: 'project = "pid1"' },
     )
-    expect(pb.collection('replies').subscribe).toHaveBeenCalledWith('*', expect.any(Function))
+    // `replies` has no project field; the project lives on the parent comment.
+    // Without this filter every authenticated subscriber receives every reply
+    // on the server, whatever project it belongs to.
+    expect(pb.collection('replies').subscribe).toHaveBeenCalledWith(
+      '*',
+      expect.any(Function),
+      { filter: 'comment.project = "pid1"' },
+    )
   })
 
   it('unsubscribing before the project lookup lands cancels the subscribe', async () => {

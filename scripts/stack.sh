@@ -60,6 +60,37 @@ pgid_of() {
 	ps -o pgid= -p "$1" 2>/dev/null | tr -d ' '
 }
 
+# port_in_use <port>: succeeds when something accepts TCP on 127.0.0.1:<port>.
+# A bash /dev/tcp probe: `ss`/`lsof` are not installed everywhere, and this is
+# the check that keeps `up` from adopting a foreign listener as our service.
+port_in_use() {
+	( : </dev/tcp/127.0.0.1/"$1" ) 2>/dev/null
+}
+
+# preflight_ports: refuse to start on top of anything already listening. A
+# foreign listener would otherwise answer the health checks while our own
+# process died ("port in use"), and caddy would happily proxy it.
+preflight_ports() {
+	local port name busy=""
+	for port in "$PB_PORT" "$DEMO_PORT" "$CADDY_PORT"; do
+		case "$port" in
+		"$PB_PORT") name=pocketbase ;;
+		"$DEMO_PORT") name=demo ;;
+		*) name=caddy ;;
+		esac
+		if port_in_use "$port"; then
+			log "error: port $port ($name) is already in use by another process"
+			busy=1
+		fi
+	done
+	if [ -n "$busy" ]; then
+		log "refusing to start: those ports belong to a process that is not this stack"
+		log "  inspect the owner with: ss -ltnp | grep -E ':($PB_PORT|$DEMO_PORT|$CADDY_PORT)\\b'"
+		log "  or stop a previous stack with: scripts/stack.sh down"
+		exit 1
+	fi
+}
+
 # start_service <name> <command...>
 # Runs the command in its own session (so the whole tree - npx -> node -> vite,
 # and any shell wrapper - shares one process group), logging to <name>.log.
@@ -96,11 +127,23 @@ start_service() {
 
 # wait_for <name> <url> [<url>...]: poll until every URL answers, bounded by
 # START_TIMEOUT seconds. On timeout, dump the service's log tail.
+#
+# The recorded pid must be alive on every poll: a URL that answers while our
+# own process is dead means something else owns the port, and reporting "up"
+# then would hand the whole suite to a foreign server.
 wait_for() {
 	local name="$1"
 	shift
-	local deadline=$((SECONDS + START_TIMEOUT)) url ok
+	local deadline=$((SECONDS + START_TIMEOUT)) url ok pid
 	while :; do
+		pid="$(read_pid "$name" || true)"
+		if [ -z "$pid" ] || ! is_alive "$pid"; then
+			printf 'error: %s exited during startup (pid %s is gone; %s)\n' \
+				"$name" "${pid:-unknown}" "$*" >&2
+			log "---- $(log_file "$name") (tail) ----"
+			tail -n 40 "$(log_file "$name")" >&2 || true
+			return 1
+		fi
 		ok=1
 		for url in "$@"; do
 			curl -fs -o /dev/null --max-time 2 "$url" 2>/dev/null || ok=0
@@ -137,6 +180,10 @@ cmd_up() {
 	if [ -n "${running// /}" ]; then
 		die "stack already running (${running% }); run 'scripts/stack.sh down' first"
 	fi
+
+	# Before anything starts: a listener on our ports is not ours (or is a
+	# stack whose pidfiles we cannot see), and adopting it is worse than failing.
+	preflight_ports
 
 	[ -f "$REPO_ROOT/packages/overlay/dist/overlay.js" ] ||
 		die "packages/overlay/dist/overlay.js is missing; run 'npm run build' at the repo root"

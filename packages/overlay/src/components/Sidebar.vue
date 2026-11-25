@@ -8,6 +8,7 @@ import { computed, ref, watch } from 'vue'
 import { useCommentsStore } from '../stores/comments'
 import { useSessionStore } from '../stores/session'
 import { backend } from '../lib/backend'
+import { canResolve } from '../lib/permissions'
 import { resolveAnchor } from '../lib/anchor'
 import type { AnchorMeta } from '../lib/anchor'
 import type { CommentRec, Role } from '../lib/types'
@@ -136,6 +137,18 @@ const inviteCopied = ref(false)
 const linkInput = ref<HTMLInputElement | null>(null)
 
 const canInvite = computed(() => session.me?.role === 'owner' || session.me?.role === 'team')
+
+// ---- Reopen (task 3.10) ---------------------------------------------------
+// Owner/team reopen any thread, a client only its own, never the agent. The
+// action lives on the Resolved tab, where a closed thread can be found; the
+// popover has the same control once the row is open.
+function canReopen(c: CommentRec): boolean {
+  return c.resolved && canResolve(session.me?.role, c.author === session.me?.id)
+}
+
+async function reopen(c: CommentRec) {
+  await store.reopen(c.id)
+}
 
 /**
  * ADR 0008: team may invite clients only; owner may invite team/client/owner.
@@ -282,24 +295,34 @@ async function copyInvite() {
       </p>
       <section v-for="g in groups" :key="g.path" class="c11n-sidebar-group">
         <h3 class="c11n-sidebar-group-label">{{ g.label }}</h3>
-        <button
-          v-for="c in g.comments"
-          :key="c.id"
-          class="c11n-sidebar-row"
-          :class="{ 'c11n-orphan': isOrphan(c) }"
-          type="button"
-          @click="onRowClick(c)"
-        >
-          <span class="c11n-sidebar-row-body">
-            <span v-if="c.seq" class="c11n-sidebar-row-seq">#{{ c.seq }}</span>
-            {{ truncate(c.body) }}
-          </span>
-          <span class="c11n-sidebar-row-meta">
-            <span class="c11n-sidebar-row-author">{{ displayName(c.authorName) }}</span>
-            <span class="c11n-sidebar-row-date">{{ displayDate(c.created) }}</span>
-            <span v-if="isOrphan(c)" class="c11n-orphan-flag">⚠ element not found</span>
-          </span>
-        </button>
+        <div v-for="c in g.comments" :key="c.id" class="c11n-sidebar-row-wrap">
+          <button
+            class="c11n-sidebar-row"
+            :class="{ 'c11n-orphan': isOrphan(c) }"
+            type="button"
+            @click="onRowClick(c)"
+          >
+            <span class="c11n-sidebar-row-body">
+              <span v-if="c.seq" class="c11n-sidebar-row-seq">#{{ c.seq }}</span>
+              {{ truncate(c.body) }}
+            </span>
+            <span class="c11n-sidebar-row-meta">
+              <span class="c11n-sidebar-row-author">{{ displayName(c.authorName) }}</span>
+              <span class="c11n-sidebar-row-date">{{ displayDate(c.created) }}</span>
+              <span v-if="isOrphan(c)" class="c11n-orphan-flag">⚠ element not found</span>
+            </span>
+          </button>
+          <button
+            v-if="canReopen(c)"
+            class="c11n-sidebar-reopen"
+            type="button"
+            :aria-label="`Reopen ${truncate(c.body)}`"
+            :disabled="store.loading"
+            @click="reopen(c)"
+          >
+            Reopen
+          </button>
+        </div>
       </section>
     </div>
   </aside>

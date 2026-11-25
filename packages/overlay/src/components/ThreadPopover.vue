@@ -6,6 +6,8 @@
 import { computed, onMounted, ref } from 'vue'
 import { computePosition, flip, offset, shift } from '@floating-ui/dom'
 import { useCommentsStore } from '../stores/comments'
+import { useSessionStore } from '../stores/session'
+import { canDelete, canResolve } from '../lib/permissions'
 import { resolveAnchor } from '../lib/anchor'
 import type { AnchorMeta } from '../lib/anchor'
 import type { CommentRec } from '../lib/types'
@@ -13,6 +15,7 @@ import type { CommentRec } from '../lib/types'
 const EMPTY_META: AnchorMeta = { tag: '', text: '', rect: { x: 0, y: 0, width: 0, height: 0 } }
 
 const store = useCommentsStore()
+const session = useSessionStore()
 const card = ref<HTMLElement | null>(null)
 const replyBody = ref('')
 
@@ -22,6 +25,12 @@ const comment = computed<CommentRec | null>(
 const replies = computed(() =>
   comment.value ? (store.replies.get(comment.value.id) ?? []) : [],
 )
+
+// ADR 0008: resolve/reopen is owner+team on any thread, client on its own,
+// never the agent; delete is the owner on anyone's, everyone else on their own.
+const isAuthor = computed(() => !!comment.value && comment.value.author === session.me?.id)
+const mayResolve = computed(() => canResolve(session.me?.role, isAuthor.value))
+const mayDelete = computed(() => canDelete(session.me?.role, isAuthor.value))
 
 onMounted(async () => {
   const c = comment.value
@@ -67,6 +76,16 @@ function resolveThread() {
   const c = comment.value
   if (c) store.resolve(c.id) // closes the thread on success
 }
+
+function reopenThread() {
+  const c = comment.value
+  if (c) store.reopen(c.id)
+}
+
+function deleteThread() {
+  const c = comment.value
+  if (c) store.deleteComment(c.id) // closes the thread on success
+}
 </script>
 
 <template>
@@ -107,12 +126,31 @@ function resolveThread() {
 
     <div class="c11n-popover-actions">
       <button
+        v-if="mayDelete"
+        class="c11n-btn c11n-btn-ghost c11n-popover-delete"
+        type="button"
+        :disabled="store.loading"
+        @click="deleteThread"
+      >
+        Delete
+      </button>
+      <button
+        v-if="mayResolve && !comment.resolved"
         class="c11n-btn c11n-btn-ghost c11n-popover-resolve"
         type="button"
         :disabled="store.loading"
         @click="resolveThread"
       >
         Resolve
+      </button>
+      <button
+        v-if="mayResolve && comment.resolved"
+        class="c11n-btn c11n-btn-ghost c11n-popover-reopen"
+        type="button"
+        :disabled="store.loading"
+        @click="reopenThread"
+      >
+        Reopen
       </button>
       <button
         class="c11n-btn c11n-reply-submit"

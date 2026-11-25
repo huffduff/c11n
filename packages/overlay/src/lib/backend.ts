@@ -20,6 +20,7 @@ export const backend: C11nBackend = {
     path === undefined ? impl.listComments(project) : impl.listComments(project, path),
   createComment: (input) => impl.createComment(input),
   setResolved: (id, resolved) => impl.setResolved(id, resolved),
+  deleteComment: (id) => impl.deleteComment(id),
   listReplies: (commentId) => impl.listReplies(commentId),
   createReply: (commentId, body) => impl.createReply(commentId, body),
   subscribe: (project, handlers) => impl.subscribe(project, handlers),

@@ -487,6 +487,37 @@
   background: #f2f2f7;
 }
 
+/* A row plus its trailing row action (Reopen on the Resolved tab, task 3.10).
+   The action is a sibling button, not nested: a button inside a button is
+   invalid HTML and swallows the row's click in some browsers. */
+.c11n-sidebar-row-wrap {
+  position: relative;
+}
+
+.c11n-sidebar-reopen {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  padding: 2px 8px;
+  border: 1px solid #d0d0d8;
+  border-radius: 999px;
+  font: inherit;
+  font-size: 11px;
+  font-weight: 600;
+  color: #444;
+  background: #fff;
+  cursor: pointer;
+}
+
+.c11n-sidebar-reopen:hover:not(:disabled) {
+  border-color: #1a1a1a;
+  color: #1a1a1a;
+}
+
+.c11n-popover-delete {
+  color: #c0392b;
+}
+
 .c11n-sidebar-row-body {
   color: #1a1a1a;
 }

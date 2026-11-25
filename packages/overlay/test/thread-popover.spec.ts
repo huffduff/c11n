@@ -6,6 +6,7 @@ import { setBackend } from '../src/lib/backend'
 import type { C11nBackend, CommentRec, ReplyRec } from '../src/lib/api'
 import { PROJECT } from '../src/lib/project'
 import { useCommentsStore } from '../src/stores/comments'
+import { useSessionStore } from '../src/stores/session'
 import ThreadPopover from '../src/components/ThreadPopover.vue'
 
 vi.mock('@floating-ui/dom', async (importOriginal) => {
@@ -53,6 +54,7 @@ function makeMockBackend(overrides: Partial<C11nBackend> = {}): C11nBackend {
     listComments: vi.fn().mockResolvedValue([]),
     createComment: vi.fn(),
     setResolved: vi.fn().mockResolvedValue(undefined),
+    deleteComment: vi.fn().mockResolvedValue(undefined),
     listReplies: vi.fn().mockResolvedValue([reply()]),
     createReply: vi.fn(),
     subscribe: vi.fn().mockReturnValue(() => {}),
@@ -84,6 +86,10 @@ describe('ThreadPopover.vue', () => {
   async function mountPopover(comment = rec(), backend: Partial<C11nBackend> = {}) {
     const mock = makeMockBackend(backend)
     setBackend(mock)
+    // The actions are role-gated (task 3.10). These tests are about the
+    // popover's mechanics, so sign in as the comment's author (role=client),
+    // which is allowed to resolve and delete its own thread.
+    useSessionStore().me = { id: comment.author, email: 'tom@hfdf.io', name: 'Tom', role: 'client' }
     const store = useCommentsStore()
     store.currentPath = comment.path
     store.items = [comment]

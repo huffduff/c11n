@@ -27,6 +27,8 @@ export interface C11nBackend {
   listComments(project: string, path?: string): Promise<CommentRec[]>
   createComment(input: NewComment): Promise<CommentRec>
   setResolved(id: string, resolved: boolean): Promise<void>
+  /** Owner (any comment) or author (own). The rules answer the same question. */
+  deleteComment(id: string): Promise<void>
   listReplies(commentId: string): Promise<ReplyRec[]>
   createReply(commentId: string, body: string): Promise<ReplyRec>
   subscribe(project: string, handlers: RealtimeHandlers): () => void
@@ -219,6 +221,12 @@ export function createPocketBaseBackend(baseUrl = '/__c11n/pb'): C11nBackend {
 
     async setResolved(id, resolved) {
       await pb.collection('comments').update(id, { resolved })
+    },
+
+    async deleteComment(id) {
+      // The replies cascade server-side (the `replies.comment` relation is
+      // cascadeDelete), so there is no second call to make here.
+      await pb.collection('comments').delete(id)
     },
 
     async listReplies(commentId) {

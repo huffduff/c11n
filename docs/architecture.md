@@ -1,6 +1,16 @@
 # c11n Architecture
 
-_Last updated: 2026-08-19 (reboot). Decision record for the rebooted design._
+_Last updated: 2026-11-25. This is an overview. The authoritative decisions
+live in [`docs/adr/`](adr/README.md). Where this page and an ADR disagree,
+the ADR wins. Current state and known bugs:
+[`docs/assessment/2026-11-25-state-of-the-repo.md`](assessment/2026-11-25-state-of-the-repo.md)._
+
+> **Pending changes:**
+> - Identity is moving from email/password to proxy-enforced magic links
+>   (ADR 0006, accepted; not built yet).
+> - Roles are being introduced (ADR 0008, accepted; not built yet).
+> - Production hosting is one Helm release per site; compose is for dev
+>   only (ADR 0005).
 
 ## Problem
 
@@ -64,8 +74,9 @@ implementation of that interface — nothing else in the overlay changes.
 Single IIFE bundle (`overlay.js`) built by Vite lib mode. Mounts into a
 `<div id="c11n-root">` with `attachShadow({mode:'open'})`; all CSS is injected
 into the shadow root so the reviewed app's styles and ours cannot collide.
-The reviewed DOM is never mutated (highlights are positioned overlay rects,
-not class changes on target elements).
+The reviewed DOM must never be mutated (ADR 0004). **Known violation:** the
+picker hover and the sidebar flash currently set an inline `outline` on the
+target element. Plan task 6.1 fixes this.
 
 Key mechanics:
 

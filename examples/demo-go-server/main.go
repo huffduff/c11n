@@ -14,6 +14,7 @@ import (
 	"os"
 	"path"
 	"strings"
+	"time"
 )
 
 func envOr(key, fallback string) string {
@@ -33,27 +34,46 @@ func main() {
 	}
 
 	log.Printf("demo-go-server: serving %s on http://%s", *dir, *addr)
-	log.Fatal(http.ListenAndServe(*addr, withGzip(newHandler(os.DirFS(*dir)))))
+	log.Fatal(newServer(*addr, *dir).ListenAndServe())
+}
+
+// newServer wires the handler and the timeouts. ReadHeaderTimeout bounds a
+// client that connects and then dribbles headers (slowloris); IdleTimeout
+// reaps keep-alive connections nothing is using.
+func newServer(addr, dir string) *http.Server {
+	return &http.Server{
+		Addr:              addr,
+		Handler:           withGzip(newHandler(os.DirFS(dir))),
+		ReadHeaderTimeout: 5 * time.Second,
+		IdleTimeout:       60 * time.Second,
+	}
 }
 
 func newHandler(files fs.FS) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/ping", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet && r.Method != http.MethodHead {
-			w.Header().Set("Allow", http.MethodGet)
+			w.Header().Set("Allow", "GET, HEAD")
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]any{"ok": true, "server": "go"})
 	})
+	// Unknown /api paths are API misses, not client-side routes: answering
+	// them with index.html made a typo'd fetch parse HTML as JSON.
+	mux.HandleFunc("/api/", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusNotFound)
+		_ = json.NewEncoder(w).Encode(map[string]any{"error": "not found"})
+	})
 	mux.Handle("/", &spa{Files: files, Fileserver: http.FileServerFS(files)})
 	return mux
 }
 
 // spa serves files from the bundle and falls back to index.html for unknown
-// non-asset paths, so /pricing works on a hard reload. A path that names an
-// asset (has an extension) must 404 instead of returning HTML: a missing .js
+// non-asset paths, so /pricing works on a hard reload. Routes containing a dot
+// are treated as assets and must 404 instead of returning HTML: a missing .js
 // answered with index.html breaks the module loader in confusing ways.
 type spa struct {
 	Files      fs.FS
@@ -65,7 +85,13 @@ func (s *spa) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if name == "" {
 		name = "index.html"
 	}
-	if _, err := fs.Stat(s.Files, name); err == nil {
+	if info, err := fs.Stat(s.Files, name); err == nil {
+		// A directory is not a file: FileServer would answer with a listing
+		// (and redirect /assets to /assets/), which no client expects.
+		if info.IsDir() {
+			http.NotFound(w, r)
+			return
+		}
 		s.Fileserver.ServeHTTP(w, r)
 		return
 	}
@@ -86,12 +112,21 @@ func (s *spa) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 // silently do nothing.
 func withGzip(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Set on every response, identity ones included: the body depends on
+		// Accept-Encoding either way, so a shared cache must key on it too.
+		w.Header().Add("Vary", "Accept-Encoding")
+		// Range applies to the identity bytes. Compressing the slice would
+		// leave Content-Range describing a length the body does not have, so
+		// byte ranges are always served uncompressed.
+		if r.Header.Get("Range") != "" {
+			next.ServeHTTP(w, r)
+			return
+		}
 		if r.Method == http.MethodHead || !strings.Contains(r.Header.Get("Accept-Encoding"), "gzip") {
 			next.ServeHTTP(w, r)
 			return
 		}
 		w.Header().Set("Content-Encoding", "gzip")
-		w.Header().Add("Vary", "Accept-Encoding")
 		gz := gzip.NewWriter(w)
 		defer gz.Close()
 		next.ServeHTTP(&gzipWriter{ResponseWriter: w, gz: gz}, r)

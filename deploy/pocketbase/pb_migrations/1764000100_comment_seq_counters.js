@@ -10,6 +10,9 @@
 // The counter row is now updated first, which takes the write lock before the
 // value is read; `next` is the last seq handed out for the project.
 //
+// The down migration (dropping comment_counters) must be reverted together
+// with the hook (pb_hooks/comments.pb.js), or every comment create fails.
+//
 // No autodate fields on purpose: the hook increments the counter with raw SQL,
 // and the created/updated columns would then have to be filled by hand.
 // All API rules stay null: only superusers and server-side hooks touch this.
@@ -31,7 +34,11 @@ migrate((app) => {
         required: true,
         collectionId: projects.id,
         maxSelect: 1,
-        cascadeDelete: false,
+        // Derived state: it must not outlive its project. With this off,
+        // PocketBase refuses to delete any project the counter points at
+        // ("part of a required relation reference"), i.e. every project that
+        // ever had a comment became undeletable.
+        cascadeDelete: true,
       },
       // Not `required`: PocketBase treats the zero value as blank, and 0 is a
       // legitimate starting counter for a project with no comments yet.

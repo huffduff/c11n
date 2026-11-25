@@ -5,8 +5,10 @@ import {
   listComments,
   listReplies,
   loginAs,
+  readCreds,
   resetData,
   seedComment,
+  superuserTokenFor,
   userToken,
 } from '../fixtures'
 
@@ -297,5 +299,54 @@ test.describe('reply and resolve', () => {
 
     await expect(page.locator('.c11n-popover-reply-body')).toHaveCount(1, { timeout: 5_000 })
     expect((await listReplies(seeded.id)).length).toBe(1)
+  })
+})
+
+test.describe('project lifecycle', () => {
+  // Regression for the B2b counter table: `comment_counters.project` was a
+  // required relation with cascadeDelete off. PocketBase refuses to delete a
+  // record that a required relation still points at, so any project that ever
+  // had a comment could not be deleted (400, forever). The counter is derived
+  // state, so it must cascade.
+  test('a project can be deleted once its comments are gone', async ({ request }) => {
+    const creds = readCreds()
+    const headers = { authorization: await superuserTokenFor() }
+    const user = await createUser(undefined, 'Project Owner')
+    const slug = `e2e-delete-${Date.now()}`
+
+    const projectRes = await request.post(`${creds.pbUrl}/api/collections/projects/records`, {
+      headers,
+      data: { name: 'Delete me', slug },
+    })
+    expect(projectRes.status(), await projectRes.text()).toBe(200)
+    const project = (await projectRes.json()) as { id: string }
+
+    try {
+      // The create runs the seq hook, which writes the project's counter row.
+      const commentRes = await request.post(`${creds.pbUrl}/api/collections/comments/records`, {
+        headers,
+        data: { project: project.id, path: '/', selector: 'h1', body: 'temporary', author: user.id },
+      })
+      expect(commentRes.status(), await commentRes.text()).toBe(200)
+      const comment = (await commentRes.json()) as { id: string }
+
+      const delComment = await request.delete(
+        `${creds.pbUrl}/api/collections/comments/records/${comment.id}`,
+        { headers },
+      )
+      expect(delComment.status(), await delComment.text()).toBe(204)
+
+      const delProject = await request.delete(
+        `${creds.pbUrl}/api/collections/projects/records/${project.id}`,
+        { headers },
+      )
+      expect(delProject.status(), await delProject.text()).toBe(204)
+    } finally {
+      // Best effort: before the fix the delete fails and the project is left
+      // behind, which is harmless (specs otherwise use the seeded project).
+      await request.delete(`${creds.pbUrl}/api/collections/projects/records/${project.id}`, {
+        headers,
+      })
+    }
   })
 })

@@ -22,16 +22,25 @@ onRecordCreateExecute((e) => {
   // comment_counters.next is the last seq handed out for the project, so the
   // upsert's inserted value (1) and its increment both yield the seq to use.
   const counter = new DynamicModel({ next: 0 })
-  e.app.db()
-    .newQuery(
-      "INSERT INTO comment_counters (id, project, next) VALUES ({:id}, {:project}, 1) " +
-        "ON CONFLICT(project) DO UPDATE SET next = next + 1 RETURNING next"
-    )
-    .bind({
-      id: $security.randomStringWithAlphabet(15, "abcdefghijklmnopqrstuvwxyz0123456789"),
-      project: e.record.get("project"),
-    })
-    .one(counter)
+  try {
+    e.app.db()
+      .newQuery(
+        "INSERT INTO comment_counters (id, project, next) VALUES ({:id}, {:project}, 1) " +
+          "ON CONFLICT(project) DO UPDATE SET next = next + 1 RETURNING next"
+      )
+      .bind({
+        id: $security.randomStringWithAlphabet(15, "abcdefghijklmnopqrstuvwxyz0123456789"),
+        project: e.record.get("project"),
+      })
+      .one(counter)
+  } catch (err) {
+    // Rethrow, but never silently: a failure here surfaces to the client as a
+    // failed create, and without this line the server log says nothing.
+    e.app
+      .logger()
+      .error("comment seq counter failed", "project", e.record.get("project"), "error", String(err))
+    throw err
+  }
   e.record.set("seq", counter.next)
   e.next()
 }, "comments")

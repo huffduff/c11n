@@ -55,7 +55,15 @@ routerUse((e) => {
             .logger()
             .info("c11n bootstrap: no owner user and C11N_OWNER_EMAIL is unset; set it to bootstrap the first owner")
         } else {
-          const ttlHours = Number($os.getenv("C11N_LINK_TTL_HOURS") || "72")
+          // The validated TTL from identity.pb.js (loaded into the app store at
+          // startup); 72 h only if that hook is somehow absent.
+          let ttlHours = 72
+          try {
+            const configured = e.app.store().get("c11n_link_ttl_hours")
+            if (typeof configured === "number") ttlHours = configured
+          } catch (err) {
+            ttlHours = 72
+          }
           const publicUrl = ($os.getenv("C11N_PUBLIC_URL") || "").replace(/\/+$/, "")
 
           // Random, never-shared password: password auth still works until task
@@ -73,7 +81,8 @@ routerUse((e) => {
           owner.setPassword(password)
           e.app.save(owner)
 
-          // 32 bytes of entropy, base64url-encoded (alphabet of 64, 43 chars).
+          // 43 draws from a 64-symbol alphabet: 43 x 6 = 258 bits of entropy,
+          // the same string a 32-byte base64url encoding produces.
           const token = $security.randomStringWithAlphabet(43, "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_")
           const expiresAt = Date.now() + ttlHours * 3600 * 1000
 

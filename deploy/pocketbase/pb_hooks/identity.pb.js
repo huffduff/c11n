@@ -53,6 +53,31 @@ const safeNext = (raw) => {
 }
 $app.store().set("c11n_safe_next", safeNext)
 
+// ---- configuration, validated once at load (M8) ---------------------------
+// The two TTL knobs are read ONCE, here, and fail closed to the production
+// default with a stdout warning. A typo must not become a 0-day cookie or a
+// 0-hour link: `Number("abc")` is NaN and `newStaticAuthToken(NaN)` is a
+// minefield, so the range check is the point, not the parsing.
+//
+// Top-level values are not in scope inside handlers, so the results go into the
+// app store (same mechanism as safeNext) and each handler reads them with a
+// local fallback.
+const envInt = (name, fallback, min, max) => {
+  const raw = $os.getenv(name)
+  if (raw === undefined || raw === null || String(raw).trim() === "") return fallback
+  const value = Number(String(raw).trim())
+  if (!isFinite(value) || Math.floor(value) !== value || value < min || value > max) {
+    console.log(
+      "c11n: ignoring " + name + "=" + raw + " (expected an integer " + min + ".." + max + "), using " + fallback
+    )
+    return fallback
+  }
+  return value
+}
+$app.store().set("c11n_session_ttl_days", envInt("C11N_SESSION_TTL_DAYS", 14, 1, 30))
+$app.store().set("c11n_link_ttl_hours", envInt("C11N_LINK_TTL_HOURS", 72, 1, 168))
+$app.store().set("c11n_invite_rate_per_hour", envInt("C11N_INVITE_RATE_PER_HOUR", 30, 1, 10000))
+
 // ---- C1: a user cannot change their own privileged fields -----------------
 onRecordUpdateRequest((e) => {
   // Superuser is the repair path (the invite route is a hook, not a request,
@@ -105,6 +130,14 @@ onRecordUpdateRequest((e) => {
 // cannot supply one, and `users.createRule = null` (migration 1764000000)
 // means only a superuser or a hook creates users at all.
 onRecordCreateRequest((e) => {
+  // M9: normalize before e.next(), so PocketBase's own email validation sees
+  // the trimmed, lowercased value. The invite route already normalizes its
+  // input; this covers the other path (a superuser in the admin UI / the API),
+  // and keeps one address from existing in two casings.
+  const email = String(e.record.get("email") || "").trim().toLowerCase()
+  if (email) {
+    e.record.set("email", email)
+  }
   if (!e.record.get("role")) {
     e.record.set("role", "client")
   }
@@ -169,6 +202,42 @@ routerAdd("POST", "/api/c11n/invite", (e) => {
     } else {
       return e.json(403, { message: "your role cannot invite" })
     }
+
+    // M6: per-inviter quota, so one compromised owner/team account cannot mint
+    // an unbounded pile of 72-hour links. Counted from `invites` itself
+    // (invitedBy + created in the last hour), which is why the spec seeds rows
+    // instead of changing the process environment: the env is read at load.
+    // Superusers are exempt (break-glass, and the CLI uses it).
+    let rateLimit = 30
+    try {
+      const configured = $app.store().get("c11n_invite_rate_per_hour")
+      if (typeof configured === "number") rateLimit = configured
+    } catch (err) {
+      rateLimit = 30
+    }
+    // PocketBase stores dates as `YYYY-MM-DD HH:MM:SS.sssZ`; a filter literal
+    // with a `T` compares as text and silently matches nothing (verified), so
+    // the separator is rewritten.
+    const since = new Date(Date.now() - 3600 * 1000).toISOString().replace("T", " ")
+    let recent = 0
+    try {
+      recent = e.app.findRecordsByFilter(
+        "invites",
+        "invitedBy = {:id} && created >= {:since}",
+        "",
+        0,
+        0,
+        { id: caller.id, since: since }
+      ).length
+    } catch (err) {
+      // A failed count must not become a free pass for a normal invite; but it
+      // also must not block one. Treat it as zero and let the audit trail show
+      // the invites that did get through.
+      recent = 0
+    }
+    if (recent >= rateLimit) {
+      return e.json(429, { message: "invite rate limit reached (" + rateLimit + "/hour); try again later" })
+    }
   }
 
   if (target) {
@@ -193,9 +262,26 @@ routerAdd("POST", "/api/c11n/invite", (e) => {
     e.app.save(target)
   }
 
-  const ttlHours = Number($os.getenv("C11N_LINK_TTL_HOURS") || "72")
-  // 32 bytes of entropy, base64url-encoded: 43 chars over a 64-symbol alphabet.
-  // Only the sha256 is stored, so a database dump cannot mint a session.
+  // M7: a re-invite revokes the user's older UNUSED links. Otherwise every
+  // link ever mailed to that address stays a 72-hour credential, and "send me a
+  // fresh link" silently widens the window instead of narrowing it. Runs before
+  // the new row is inserted, so it cannot mark the new link used.
+  e.app
+    .db()
+    .newQuery("UPDATE invites SET usedAt = {:now} WHERE user = {:uid} AND (usedAt IS NULL OR usedAt = '')")
+    .bind({ now: new Date().toISOString(), uid: target.id })
+    .execute()
+
+  let ttlHours = 72
+  try {
+    const configured = $app.store().get("c11n_link_ttl_hours")
+    if (typeof configured === "number") ttlHours = configured
+  } catch (err) {
+    ttlHours = 72
+  }
+  // 43 draws from a 64-symbol alphabet: 43 x 6 = 258 bits of entropy (the same
+  // string a 32-byte base64url encoding produces). Only the sha256 is stored,
+  // so a database dump cannot mint a session.
   const token = $security.randomStringWithAlphabet(43, "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_")
 
   const invites = e.app.findCollectionByNameOrId("invites")
@@ -347,7 +433,15 @@ routerAdd("POST", "/api/c11n/auth/claim", (e) => {
   // NANOseconds (a bare 60 is 60ns and mints an already-expired token), and it
   // is non-refreshable — which is what we want: the cookie's lifetime is the
   // session's lifetime, decided here from C11N_SESSION_TTL_DAYS.
-  const ttlDays = Number($os.getenv("C11N_SESSION_TTL_DAYS") || "14")
+  const ttlDays = (() => {
+    try {
+      const configured = $app.store().get("c11n_session_ttl_days")
+      if (typeof configured === "number") return configured
+    } catch (err) {
+      // fall through
+    }
+    return 14
+  })()
   const token = user.newStaticAuthToken(ttlDays * 86400 * 1000000000)
 
   // C11N_COOKIE_SECURE defaults to true; the local e2e stack runs over plain
@@ -512,6 +606,31 @@ routerAdd("GET", "/api/c11n/me", (e) => {
 })
 
 routerAdd("POST", "/api/c11n/auth/logout", (e) => {
+  // M5: clearing the cookie is not enough — a copied cookie would keep working
+  // for the rest of its 14 days. Rotating the user's `tokenKey` invalidates
+  // every auth token ever minted for them ("sign out everywhere"), which is the
+  // right blast radius for a session whose bearer may have leaked.
+  //
+  // Best effort: a missing or already-invalid cookie still gets the clearing
+  // Set-Cookie below, because "log out" must always end signed out locally.
+  const cookieHeader = String(e.request.header.get("Cookie") || "")
+  const parts = cookieHeader.split(";")
+  for (let i = 0; i < parts.length; i++) {
+    const part = parts[i].trim()
+    if (part.indexOf("c11n_session=") === 0) {
+      const sessionToken = part.slice("c11n_session=".length)
+      try {
+        const record = e.app.findAuthRecordByToken(sessionToken, "auth")
+        if (record && record.collection().name === "users") {
+          record.refreshTokenKey()
+          e.app.save(record)
+        }
+      } catch (err) {
+        // Not a live token: nothing to revoke.
+      }
+    }
+  }
+
   // Max-Age=0 with the same name/path/attributes as the session cookie: a
   // cookie is only cleared when every attribute matches.
   const secure = ($os.getenv("C11N_COOKIE_SECURE") || "true") !== "false"

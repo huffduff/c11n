@@ -110,7 +110,13 @@ overridden by `scripts/stack.sh` for the local stack:
 | `C11N_PUBLIC_URL` | request origin | `http://127.0.0.1:18080` |
 | `C11N_LINK_TTL_HOURS` | 72 | 72 |
 | `C11N_SESSION_TTL_DAYS` | 14 | 14 |
+| `C11N_INVITE_RATE_PER_HOUR` | 30 | 30 |
 | `C11N_COOKIE_SECURE` | true | true (the cookie is asserted as `Secure`) |
+
+Both TTL knobs are validated once at load: a non-integer or out-of-range value
+(`C11N_SESSION_TTL_DAYS` 1..30, `C11N_LINK_TTL_HOURS` 1..168) falls back to the
+default and prints a warning on stdout. `node scripts/check-env-validation.mjs`
+pins that behaviour.
 
 The `request` fixture shares one cookie jar across a spec file: use
 `isolatedRequest()` from `fixtures.ts` for the "anonymous gets 401" assertions,

@@ -15,6 +15,7 @@
     "e2e:go": "C11N_FIXTURE=go npm test -w e2e",
     "check:pins": "node scripts/check-pins.mjs",
     "check:rule-floor": "node scripts/check-rule-floor.mjs",
-    "check:migrations": "node scripts/check-migrations.mjs"
+    "check:migrations": "node scripts/check-migrations.mjs",
+    "check:env": "node scripts/check-env-validation.mjs"
   }
 }

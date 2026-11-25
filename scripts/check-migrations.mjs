@@ -9,14 +9,17 @@
 // scratch port, plain HTTP, no browser, exit 1 on a regression.
 //
 // What it proves, in order:
-//   1. the schema BEFORE 1764001000 accepts data (users, comments, replies),
-//      then 1764001000 applies on top of that DB;
+//   1. the schema BEFORE the identity pair accepts data (users, comments,
+//      replies), then both migrations apply on top of that DB;
 //   2. after `up`: `users.role` is a required select with the four ADR 0008
-//      values, pre-existing users are backfilled to `team`, and `invites`
-//      exists with all five API rules null;
-//   3. `down 1` removes `invites` and the `role` field and LEAVES THE DATA
-//      ALONE (the user, comment and reply rows survive);
-//   4. `up` again reapplies cleanly (the backfill is idempotent).
+//      values, pre-existing users are backfilled to `team`, `invites` exists
+//      with all five API rules null, `users.updateRule` carries the C1 floor and
+//      `users.createRule` is still null;
+//   3. `down 2` removes `invites`, the `role` field and the rule floor — with a
+//      row in `invites` — and LEAVES THE DATA ALONE (user, comment and reply
+//      rows survive);
+//   4. `up` again reapplies cleanly (the backfill is idempotent) and the floor
+//      is back.
 //
 // Usage: node scripts/check-migrations.mjs [--keep] [--port 28197]
 //   POCKETBASE_BIN overrides the binary; otherwise .tools/pocketbase, else
@@ -37,9 +40,12 @@ const portArg = argv.indexOf('--port')
 const PORT = portArg === -1 ? Number(process.env.C11N_MIGRATIONS_PORT ?? 28197) : Number(argv[portArg + 1])
 const BASE = `http://127.0.0.1:${PORT}`
 
-// The migration under test. Named explicitly on purpose: the check is about
-// this migration's reversibility, and a rename is a signal to update this file.
+// The migrations under test. Named explicitly on purpose: the check is about
+// their reversibility, and a rename is a signal to update this file. They are
+// applied in this order, and `down` has to revert exactly them.
 const MIGRATION = '1764001000_roles_and_invites.js'
+const FLOOR_MIGRATION = '1764001100_users_update_rule_floor.js'
+const IDENTITY_MIGRATIONS = [MIGRATION, FLOOR_MIGRATION]
 const ROLES = ['owner', 'team', 'client', 'agent']
 
 const ADMIN = { email: 'migrations-admin@c11n.test', password: 'migrations-password' }
@@ -165,9 +171,13 @@ async function main() {
 
   const sourceDir = path.join(repoRoot, 'deploy', 'pocketbase', 'pb_migrations')
   const all = fs.readdirSync(sourceDir).filter((f) => f.endsWith('.js'))
-  if (!all.includes(MIGRATION)) throw new Error(`${MIGRATION} is missing from deploy/pocketbase/pb_migrations`)
+  for (const migration of IDENTITY_MIGRATIONS) {
+    if (!all.includes(migration)) throw new Error(`${migration} is missing from deploy/pocketbase/pb_migrations`)
+  }
+  // "pre" is every migration EXCEPT the identity pair, so the DB really starts
+  // without `users.role`, without `invites` and without the users rule floor.
   for (const file of all) {
-    if (file === MIGRATION) continue
+    if (IDENTITY_MIGRATIONS.includes(file)) continue
     fs.copyFileSync(path.join(sourceDir, file), path.join(preDir, file))
   }
   fs.cpSync(sourceDir, fullDir, { recursive: true })
@@ -235,6 +245,31 @@ async function main() {
   const hashIndexes = (invitesCol.json?.indexes ?? []).join(' ')
   check(/UNIQUE INDEX idx_invites_token_hash ON invites \(tokenHash\)/.test(hashIndexes), 'invites.tokenHash has a unique index')
 
+  // C1's rule floor rides on the same batch: `users` must not let an account
+  // PATCH its own role/email/verified, and public signup must stay closed.
+  const usersRule = String(usersCol.json?.updateRule ?? '')
+  for (const field of ['role', 'email', 'verified']) {
+    check(
+      usersRule.includes(`@request.body.${field}:isset = false`),
+      `users.updateRule requires ${field} to be unset for the account itself`,
+    )
+  }
+  check(usersCol.json?.createRule === null, `users.createRule is null after all migrations (got ${JSON.stringify(usersCol.json?.createRule)})`)
+
+  // A row in `invites` before the down: reverting a migration has to work on a
+  // populated table, not just on an empty one.
+  const inviteRow = await api('POST', '/api/collections/invites/records', {
+    token: su,
+    data: {
+      email: `invited-${Date.now()}@c11n.test`,
+      role: 'client',
+      user: user.id,
+      tokenHash: 'a'.repeat(64),
+      expiresAt: new Date(Date.now() + 3600_000).toISOString(),
+    },
+  })
+  check(inviteRow.status === 200, `an invite row can be created before down (got ${inviteRow.status})`)
+
   // A second user needs the defaulted role: the pre-identity rows are only the
   // migration's own backfill. This assertion is about the schema not blocking
   // an insert via the superuser API once a hook later supplies the value, so it
@@ -253,8 +288,10 @@ async function main() {
   await stop()
 
   // ---- 3. down: gone, and the data is not --------------------------------
-  console.log(`\nmigrate down 1`)
-  await run(pb, ['migrate', 'down', '1', ...fullDirs], { input: 'y\n' })
+  // Two migrations now: the schema (role + invites) and the users rule floor.
+  // `down N` reverts the last N applied, which is exactly this pair.
+  console.log(`\nmigrate down ${IDENTITY_MIGRATIONS.length}`)
+  await run(pb, ['migrate', 'down', String(IDENTITY_MIGRATIONS.length), ...fullDirs], { input: 'y\n' })
   // Serve against the PRE-identity migrations dir. `pocketbase serve` applies
   // every pending migration at startup regardless of --automigrate (that flag
   // only controls admin-UI schema snapshotting), so pointing it at fullDir here
@@ -268,6 +305,13 @@ async function main() {
   check(invitesAfter.status === 404, `invites is gone after down (got ${invitesAfter.status})`)
   const usersAfter = await api('GET', '/api/collections/users', { token: su })
   check(!(usersAfter.json?.fields ?? []).some((f) => f.name === 'role'), 'users.role is gone after down')
+  // The floor is gone too: back to PocketBase's default, and signup still closed
+  // (1764000000 is not part of this batch).
+  check(
+    String(usersAfter.json?.updateRule ?? '') === 'id = @request.auth.id',
+    `users.updateRule is back to the default after down (got ${JSON.stringify(usersAfter.json?.updateRule)})`,
+  )
+  check(usersAfter.json?.createRule === null, 'users.createRule is still null after down (no public signup)')
 
   const userAfter = await api('GET', `/api/collections/users/records/${user.id}`, { token: su })
   check(userAfter.status === 200 && userAfter.json?.email === user.email, 'the legacy user row survives down')
@@ -289,6 +333,11 @@ async function main() {
   check(reBackfill.json?.role === 'team', `the backfill is idempotent (got ${reBackfill.json?.role})`)
   const reInvites = await api('GET', '/api/collections/invites', { token: su })
   check(reInvites.status === 200, `invites is back after re-up (got ${reInvites.status})`)
+  const reUsersRule = String(reUsers.json?.updateRule ?? '')
+  check(
+    reUsersRule.includes('@request.body.role:isset = false'),
+    `the users rule floor is back after re-up (got ${JSON.stringify(reUsersRule)})`,
+  )
 }
 
 try {

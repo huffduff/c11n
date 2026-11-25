@@ -114,9 +114,9 @@ routerAdd("POST", "/api/c11n/invite", (e) => {
     target.set("name", email.split("@")[0])
     target.set("role", role)
     target.set("verified", true)
-    // Unusable random password: password auth is still enabled until 3.9, and
-    // an invited account must not be password-guessable in the meantime. Sign
-    // in is by magic link only.
+    // Unusable random password: password auth is disabled (migration
+    // 1766000000), but an auth record still needs a password value, and a
+    // non-guessable one keeps a rollback from becoming a way in.
     target.setPassword($security.randomStringWithAlphabet(40, "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"))
     e.app.save(target)
   }
@@ -154,8 +154,8 @@ routerAdd("POST", "/api/c11n/invite", (e) => {
 
 // ---- 3.4: GET /api/c11n/auth/magic — the callback --------------------------
 // Public (no auth): the token in the URL is the credential. Caddy rewrites
-// /__c11n/auth/magic here in 3.8; until then the route is reached under the
-// /__c11n/pb prefix.
+// /__c11n/auth/magic here (3.8); the route is also reachable under the
+// /__c11n/pb prefix for pod-internal callers.
 //
 // Single use is enforced by ONE conditional UPDATE, not by read-then-save:
 // `usedAt` is only written when it is still empty, and the affected-row count

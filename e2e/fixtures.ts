@@ -133,11 +133,13 @@ async function allRecords(collection: string): Promise<Array<{ id: string }>> {
 /**
  * Delete every comment and reply. Comments cascade to their replies, but
  * replies are cleared first anyway so a half-deleted state can't survive.
+ * The per-project seq counters go too: "reset" means the next comment gets
+ * seq 1, which several specs assert on.
  */
 export async function resetData(): Promise<void> {
   const creds = readCreds()
   const headers = { authorization: await superuserTokenFor() }
-  for (const collection of ['replies', 'comments']) {
+  for (const collection of ['replies', 'comments', 'comment_counters']) {
     for (const rec of await allRecords(collection)) {
       const res = await (await ctx()).delete(`${creds.pbUrl}/api/collections/${collection}/records/${rec.id}`, {
         headers,

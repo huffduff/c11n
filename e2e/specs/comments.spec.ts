@@ -17,8 +17,6 @@ import {
  * of a known open bug and stay visible until Phase 2 fixes it:
  *   - B3  (fixme, ~5/10 flaky): pins stay display:none until scroll/resize
  *   - B4  (fail, 10/10): a saved comment renders two pins (realtime echo)
- *   - B2b (fixme, ~9/10): the seq hook's MAX(seq) read races on simultaneous
- *     creates, so some requests get a 400 unique violation
  *   - reply echo (fixme, 10/10 in isolation): a UI reply renders twice
  * Each becomes a passing spec the moment its fix lands.
  *
@@ -68,12 +66,12 @@ test.describe('B2 — comment creation', () => {
       .toEqual([1])
   })
 
-  // B2b: simultaneous creates race on MAX(seq). The hook removes the deadlock
-  // but not the read/write race: some requests come back 400
-  // validation_not_unique against idx_comments_project_seq.
-  // fixme, not fail: the race resolves differently each time — reproduced
-  // 9/10 under --repeat-each=10, so a `test.fail()` here would itself flake.
-  test.fixme('10 parallel creates get unique seqs 1..10', async ({ request }) => {
+  // B2b regression: simultaneous creates used to race on MAX(seq) — the read
+  // took no write lock, so several requests got 400 validation_not_unique
+  // against idx_comments_project_seq (reproduced 9/10 under --repeat-each=10).
+  // The hook now takes the write lock first (counter table), so this must pass
+  // every time it runs.
+  test('10 parallel creates get unique seqs 1..10', async ({ request }) => {
     const user = await createUser(undefined, 'B2 Parallel')
     const token = await userToken(user.email)
     const project = await defaultProjectId()

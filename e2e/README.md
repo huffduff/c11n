@@ -1,8 +1,8 @@
 # End-to-end suite
 
-The specs drive the real stack: PocketBase, Caddy and the demo vite dev server,
-started from `scripts/stack.sh` (native binaries, no Docker). `global-setup.ts`
-wipes `.stack/pb_data`, brings the stack up and reads `.stack/creds.json`;
+The specs drive the real stack: PocketBase, Caddy and a demo upstream, started
+from `scripts/stack.sh` (native binaries, no Docker). `global-setup.ts` wipes
+`.stack/pb_data`, brings the stack up and reads `.stack/creds.json`;
 `global-teardown.ts` runs `scripts/stack.sh down`.
 
 ## Run it
@@ -11,9 +11,29 @@ wipes `.stack/pb_data`, brings the stack up and reads `.stack/creds.json`;
 # 1. once per checkout: pinned tools (PocketBase download + Caddy build)
 scripts/fetch-tools.sh
 
-# 2. the suite (builds the overlay, then runs Playwright)
+# 2. the suite against both fixtures (builds the overlay first)
 npm run e2e
+
+# or one fixture at a time
+npm run e2e:vite
+npm run e2e:go
 ```
+
+## Two fixtures, one suite
+
+The dogfood app is served by Vite in dev and by a Go backend in production
+(ADR 0001), so the same suite runs against both topologies, each with its own
+fresh stack:
+
+| `C11N_FIXTURE` | upstream | port |
+| --- | --- | --- |
+| `vite` (default) | `examples/demo-vue` via the vite dev server (HMR) | 15173 |
+| `go` | the built `examples/demo-vue/dist` via `examples/demo-go-server` | 15174 |
+
+`stack.sh` builds the SPA and the Go binary into `.stack/` for the `go`
+fixture. Upstreams are otherwise interchangeable: Caddy's config is identical,
+and `specs/topology.spec.ts` holds the specs that only make sense for one side
+(each skips on the other). CI runs the matrix over both fixtures.
 
 `fetch-tools.sh` builds Caddy with xcaddy (needs `go`, pinned in
 `.tool-versions`; `asdf install` if the shim says no version is set) and the
@@ -23,9 +43,9 @@ build, point `CADDY_BIN` / `POCKETBASE_BIN` at prebuilt binaries —
 `fetch-tools.sh` is idempotent: an existing `.tools/caddy` of the pinned version
 is left alone.
 
-`stack.sh up` refuses to start when 18090/15173/18080 are already listening
-(it will not adopt a foreign process) and stops whatever it did start if any
-step fails.
+`stack.sh up` refuses to start when 18090/15173 (or 15174)/18080 are already
+listening (it will not adopt a foreign process) and stops whatever it did start
+if any step fails.
 
 ## This box: Playwright browsers
 

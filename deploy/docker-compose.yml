@@ -9,6 +9,9 @@ services:
         target: /etc/caddy/Caddyfile
         read_only: true
       - ../packages/overlay/dist:/srv/overlay:ro
+      # The static sign-in page (task 3.7), served at /__c11n/auth/. Baked into
+      # the image in production (Phase 5); a bind mount keeps dev rebuild-free.
+      - ../packages/signin:/srv/signin:ro
     environment:
       - C11N_UPSTREAM=${C11N_UPSTREAM:-http://demo:5173}
       # Caddy reads {$C11N_UPSTREAM_TLS:verify}, and an EMPTY value counts as
@@ -16,6 +19,7 @@ services:
       # upstream_tls_"). The default keeps it non-empty; leave the variable
       # unset rather than empty.
       - C11N_UPSTREAM_TLS=${C11N_UPSTREAM_TLS:-verify}
+      - C11N_SIGNIN_DIR=/srv/signin
     depends_on:
       - pocketbase
       - demo
@@ -41,6 +45,19 @@ services:
     ports:
       # admin UI only; the API is same-origin via caddy at /__c11n/pb/
       - "8090:8090"
+    environment:
+      # Identity (ADR 0006). The first owner is created on a fresh database and
+      # its one-time sign-in link is printed to the container log; see
+      # docs/quickstart.md. Everything else is invited from the overlay.
+      - C11N_OWNER_EMAIL=${C11N_OWNER_EMAIL:-owner@example.com}
+      # Absolute invites are built from this origin; the default matches the
+      # published caddy port above.
+      - C11N_PUBLIC_URL=${C11N_PUBLIC_URL:-http://localhost:8080}
+      - C11N_LINK_TTL_HOURS=${C11N_LINK_TTL_HOURS:-72}
+      - C11N_SESSION_TTL_DAYS=${C11N_SESSION_TTL_DAYS:-14}
+      # Keep true for any https review host. The local compose stack is served
+      # on localhost, which browsers treat as trustworthy, so the default holds.
+      - C11N_COOKIE_SECURE=${C11N_COOKIE_SECURE:-true}
 
 volumes:
   pb_data:

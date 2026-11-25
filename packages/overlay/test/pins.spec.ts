@@ -256,6 +256,108 @@ describe('PinLayer.vue', () => {
     await new Promise((r) => setTimeout(r, 0))
     await nextTick()
 
-    expect(wrapper.findAll('.c11n-pin')).toHaveLength(2)
+    const pins = wrapper.findAll('.c11n-pin')
+    expect(pins).toHaveLength(2)
+    // Count alone is not enough: the pin must also be measured, or it renders
+    // display:none until something else happens to schedule a frame.
+    expect(pins[0].attributes('style') ?? '').not.toContain('display: none')
   })
 })
+
+// Production shape: PinLayer lives inside the overlay's shadow root, so the
+// pins it renders are invisible to the light-DOM MutationObserver that drives
+// the tracker. Nothing but PinLayer itself can schedule the frame that
+// measures a target revealed by a mutation.
+describe('PinLayer.vue inside a shadow root', () => {
+  let pinia: Pinia
+  let wrapper: VueWrapper | null = null
+  let frameQueue: FrameRequestCallback[] = []
+
+  function flushFrame() {
+    const q = frameQueue
+    frameQueue = []
+    for (const cb of q) cb(0)
+  }
+
+  /** Let jsdom deliver MutationObserver records (microtask checkpoint). */
+  const tick = () => new Promise((r) => setTimeout(r, 0))
+
+  const rect = (x: number, y: number, width: number, height: number) =>
+    ({ x, y, width, height, top: y, left: x, right: x + width, bottom: y + height, toJSON() {} }) as DOMRect
+
+  beforeEach(() => {
+    frameQueue = []
+    vi.stubGlobal('requestAnimationFrame', (cb: FrameRequestCallback) => {
+      frameQueue.push(cb)
+      return frameQueue.length
+    })
+    vi.stubGlobal('cancelAnimationFrame', () => {})
+    setActivePinia((pinia = createPinia()))
+    setBackend(makeMockBackend())
+    seedDom()
+  })
+
+  afterEach(() => {
+    wrapper?.unmount()
+    wrapper = null
+    vi.unstubAllGlobals()
+  })
+
+  it('shows the pin of an element that appears after mount', async () => {
+    // The overlay's mount: a host in the light DOM, the app in its shadow root.
+    const host = document.createElement('div')
+    host.id = 'c11n-root'
+    document.body.appendChild(host)
+    const shadow = host.attachShadow({ mode: 'open' })
+    const mountPoint = document.createElement('div')
+    shadow.appendChild(mountPoint)
+
+    // #beta is not rendered yet, so c2 starts orphaned.
+    document.querySelector('#beta')?.remove()
+    const store = seedStore([c1(), c2()])
+    wrapper = mount(PinLayer, { attachTo: mountPoint, global: { plugins: [pinia] } })
+    flushFrame()
+    await nextTick()
+    expect(shadow.querySelectorAll('.c11n-pin')).toHaveLength(1)
+
+    // Late render, e.g. a lazy chunk finishing after the overlay mounted.
+    const el = document.createElement('p')
+    el.id = 'beta'
+    el.textContent = 'Beta text'
+    el.getBoundingClientRect = () => rect(100, 50, 20, 10)
+    document.body.appendChild(el)
+
+    await tick() // MutationObserver delivers
+    flushFrame() // recompute against the OLD target set → c2 gains a pin
+    await nextTick() // Vue renders the new pin
+    flushFrame() // the refresh-on-change frame that measures it
+    await nextTick()
+
+    const pins = [...shadow.querySelectorAll<HTMLElement>('.c11n-pin')]
+    expect(pins).toHaveLength(2)
+    // pins[0] is c2 (created earlier) and is the one that appeared late.
+    expect(pins[0].style.display).not.toBe('none')
+    expect(pins[0].getAttribute('style') ?? '').not.toContain('display: none')
+    expect(pins[0].style.left).toBe('124px')
+    expect(pins[0].style.top).toBe('46px')
+    expect(store.orphans).toEqual([])
+  })
+
+  it('keeps a pin hidden when its target is gone and nothing brings it back', async () => {
+    const host = document.createElement('div')
+    host.id = 'c11n-root'
+    document.body.appendChild(host)
+    const mountPoint = document.createElement('div')
+    host.attachShadow({ mode: 'open' }).appendChild(mountPoint)
+
+    document.querySelector('#beta')?.remove()
+    const store = seedStore([c2()])
+    wrapper = mount(PinLayer, { attachTo: mountPoint, global: { plugins: [pinia] } })
+    flushFrame()
+    await nextTick()
+
+    expect(store.orphans.map((c) => c.id)).toEqual(['c2'])
+    expect(host.shadowRoot!.querySelectorAll('.c11n-pin')).toHaveLength(0)
+  })
+})
+

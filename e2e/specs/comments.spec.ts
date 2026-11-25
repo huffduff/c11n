@@ -133,6 +133,35 @@ test.describe('B3 — pins visible on load', () => {
     expect(pinBox!.y).toBeLessThan(h1Box!.y + h1Box!.height)
     expect(pinBox!.y + pinBox!.height).toBeGreaterThan(h1Box!.y)
   })
+
+  // B3 mutation path: the pin's own DOM lives in the shadow root, so the
+  // light-DOM observer that drives the tracker never sees it. If the frame
+  // that re-resolved the anchors is not followed by one that measures the new
+  // target, the pin stays display:none forever — no scroll or resize needed to
+  // reproduce, and nothing else would rescue it.
+  test('a pin appears when its anchored element is injected after load', async ({ page }) => {
+    const user = await createUser(undefined, 'B3 Late')
+    await seedComment({ author: user.id, path: '/', selector: '#late-target', body: 'late anchor' })
+
+    await signedIn(page, user.email, user.name)
+    // The target does not exist: the comment is orphaned, no pin.
+    await page.waitForTimeout(1_000)
+    await expect(page.locator('.c11n-pin')).toHaveCount(0)
+
+    // Late render, as an SPA chunk finishing hydration would do.
+    await page.evaluate(() => {
+      const el = document.createElement('div')
+      el.id = 'late-target'
+      el.textContent = 'late target'
+      el.style.cssText = 'display:block;width:200px;height:40px;margin:40px 0'
+      document.body.appendChild(el)
+    })
+
+    // No scrolling, no resizing: the injection is the only event.
+    const pin = page.locator('.c11n-pin')
+    await expect(pin).toHaveCount(1, { timeout: 2_000 })
+    await expect(pin).toBeVisible({ timeout: 2_000 })
+  })
 })
 
 test.describe('B4 — one pin per saved comment', () => {

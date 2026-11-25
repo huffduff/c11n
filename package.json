@@ -13,6 +13,8 @@
     "e2e": "npm run build && npm run e2e:vite && npm run e2e:go",
     "e2e:vite": "C11N_FIXTURE=vite npm test -w e2e",
     "e2e:go": "C11N_FIXTURE=go npm test -w e2e",
-    "check:pins": "node scripts/check-pins.mjs"
+    "check:pins": "node scripts/check-pins.mjs",
+    "check:rule-floor": "node scripts/check-rule-floor.mjs",
+    "check:migrations": "node scripts/check-migrations.mjs"
   }
 }

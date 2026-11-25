@@ -129,6 +129,12 @@ jobs:
       - name: Rule floor without hooks
         run: node scripts/check-rule-floor.mjs
 
+      # Applies the Phase 3 identity migration to a scratch DB that already has
+      # users/comments in it, reverts it, and re-applies it (port 28197). e2e
+      # always starts from an empty pb_data, so it cannot cover this.
+      - name: Migrations up/down on a DB with data
+        run: node scripts/check-migrations.mjs
+
       - name: Install dependencies
         run: npm ci
 

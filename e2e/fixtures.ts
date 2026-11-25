@@ -380,3 +380,67 @@ export async function freshPage(page: Page, url = '/'): Promise<void> {
   await page.evaluate(() => localStorage.clear())
   await page.reload()
 }
+
+export interface MagicOpen {
+  status: number
+  location?: string
+  /** The raw Set-Cookie header, when the response set one. */
+  setCookie?: string
+  body: string
+}
+
+/**
+ * GET a magic link WITHOUT following the redirect: the interesting parts of
+ * the response are the status, the Location and the Set-Cookie header.
+ */
+export async function openMagicLink(request: APIRequestContext, link: string): Promise<MagicOpen> {
+  const res = await request.get(link, { maxRedirects: 0 })
+  const headers = res.headers()
+  return {
+    status: res.status(),
+    location: headers['location'] ?? headers['Location'],
+    setCookie: headers['set-cookie'] ?? headers['Set-Cookie'],
+    body: await res.text(),
+  }
+}
+
+export interface ParsedCookie {
+  name: string
+  value: string
+  /** Attributes exactly as sent, lowercased: ['path=/', 'httponly', ...]. */
+  attributes: string[]
+  raw: string
+}
+
+/** Parse one Set-Cookie header (the session cookie has no commas in values). */
+export function parseSetCookie(header: string): ParsedCookie {
+  const [pair, ...attrs] = header.split(';').map((part) => part.trim())
+  const eq = pair.indexOf('=')
+  return {
+    name: pair.slice(0, eq),
+    value: pair.slice(eq + 1),
+    attributes: attrs.map((a) => a.toLowerCase()),
+    raw: header,
+  }
+}
+
+/**
+ * The PocketBase auth token inside a `c11n_session` cookie. Specs pass it as
+ * `Authorization`, which is exactly what Caddy's `header_up Authorization
+ * {http.request.cookie.c11n_session}` will do for /__c11n/pb/* (task 3.8).
+ */
+export function sessionToken(setCookie: string): string {
+  const cookie = parseSetCookie(setCookie)
+  if (cookie.name !== 'c11n_session') throw new Error(`not a c11n_session cookie: ${cookie.raw}`)
+  return cookie.value
+}
+
+/** Invite rows for one email, plus a PATCH helper for the expiry spec. */
+export async function patchInvite(id: string, data: Record<string, unknown>): Promise<void> {
+  const creds = readCreds()
+  const res = await (await ctx()).patch(`${creds.pbUrl}/api/collections/invites/records/${id}`, {
+    headers: { authorization: await superuserTokenFor() },
+    data,
+  })
+  if (!res.ok()) throw new Error(`patchInvite -> ${res.status()} ${await res.text()}`)
+}

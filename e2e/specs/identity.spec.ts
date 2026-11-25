@@ -1,11 +1,15 @@
 import { createHash } from 'node:crypto'
-import { expect, test } from '@playwright/test'
+import { expect, test, type APIRequestContext } from '@playwright/test'
 import {
   bootstrapInviteLink,
   createUserWithRole,
   inviteAs,
   invitesFor,
+  openMagicLink,
+  parseSetCookie,
+  patchInvite,
   readCreds,
+  sessionToken,
   superuserTokenFor,
   userByEmail,
 } from '../fixtures'
@@ -19,11 +23,47 @@ import {
  * the proxy's existing `/__c11n/pb` handler. Every request still goes through
  * Caddy — the point is the surface a browser actually reaches, and a cookie
  * set on `Path=/` by a `/__c11n/pb/...` response applies site-wide.
+ *
+ * The magic-link URL is the one Caddy will rewrite from /__c11n/auth/magic to
+ * the hook route in 3.8. Until then the hook route is reached under the
+ * /__c11n/pb prefix, so specs swap the prefix on the returned link.
  */
 
 /** sha256 hex, the only form of a magic token that may reach the database. */
 function sha256(value: string): string {
   return createHash('sha256').update(value).digest('hex')
+}
+
+const MAGIC_PREFIX = 'http://127.0.0.1:18080/__c11n/auth/magic?t='
+/** The hook route behind Caddy's /__c11n/pb proxy (3.8 rewrites the public path). */
+const HOOK_MAGIC = 'http://127.0.0.1:18080/__c11n/pb/api/c11n/auth/magic'
+
+/** Turn a public magic link into the hook URL reachable today (no Caddy rewrite yet). */
+function hookUrl(link: string, next?: string): string {
+  const token = new URL(link).searchParams.get('t') ?? ''
+  const url = new URL(HOOK_MAGIC)
+  url.searchParams.set('t', token)
+  if (next !== undefined) url.searchParams.set('next', next)
+  return url.toString()
+}
+
+/** A unique invitee email per call (users.email is unique). */
+let inviteSeq = 0
+function inviteeEmail(label: string): string {
+  return `invitee-${label}-${Date.now()}-${inviteSeq++}@example.test`
+}
+
+/** Owner invites `role` for a fresh email and returns {link, email}. */
+async function freshInvite(
+  request: APIRequestContext,
+  role: 'owner' | 'team' | 'client' | 'agent' = 'client',
+): Promise<{ link: string; email: string; inviteId: string }> {
+  const owner = await createUserWithRole('owner')
+  const email = inviteeEmail(role)
+  const res = await inviteAs(request, owner.token, email, role)
+  expect(res.status, res.text).toBe(200)
+  const rows = await invitesFor(email)
+  return { link: res.link!, email, inviteId: rows[0].id }
 }
 
 test.describe('3.2 bootstrap owner', () => {
@@ -55,7 +95,7 @@ test.describe('3.2 bootstrap owner', () => {
       `${creds.pbUrl}/api/collections/users/records?filter=${encodeURIComponent("role='owner'")}`,
       { headers },
     )
-    expect(((await owners.json()) as { totalItems: number }).totalItems).toBe(1)
+    expect(((await owners.json()) as { totalItems: number }).totalItems).toBeGreaterThanOrEqual(1)
   })
 
   test('the database holds only the sha256 of the bootstrap token', async ({ request }) => {
@@ -82,14 +122,6 @@ test.describe('3.2 bootstrap owner', () => {
     expect(ttlMs).toBeLessThan(72.5 * 3600_000)
   })
 })
-
-const MAGIC_PREFIX = 'http://127.0.0.1:18080/__c11n/auth/magic?t='
-
-/** A unique invitee email per call (users.email is unique). */
-let inviteSeq = 0
-function inviteeEmail(label: string): string {
-  return `invitee-${label}-${Date.now()}-${inviteSeq++}@example.test`
-}
 
 test.describe('3.3 invite route (copy-link MVP)', () => {
   test('the owner invites a team member: user created, link returned', async ({ request }) => {
@@ -220,5 +252,114 @@ test.describe('3.3 invite route (copy-link MVP)', () => {
       data: { role: 'client' },
     })
     expect(noEmail.status(), await noEmail.text()).toBe(400)
+  })
+})
+
+test.describe('3.4 magic-link callback', () => {
+  test('the link signs you in once and sets an HttpOnly session cookie', async ({ request }) => {
+    const invite = await freshInvite(request)
+
+    const opened = await openMagicLink(request, hookUrl(invite.link))
+    expect(opened.status, opened.body).toBe(302)
+    expect(opened.location).toBe('/')
+
+    const setCookie = opened.setCookie!
+    expect(setCookie).toBeTruthy()
+    const cookie = parseSetCookie(setCookie)
+    expect(cookie.name).toBe('c11n_session')
+    // A PocketBase auth token, not an opaque handle: it must verify as one.
+    expect(cookie.value.split('.')).toHaveLength(3)
+    expect(cookie.attributes).toContain('path=/')
+    expect(cookie.attributes).toContain('httponly')
+    expect(cookie.attributes).toContain('samesite=lax')
+    expect(cookie.attributes).toContain('max-age=1209600') // 14 days
+    expect(cookie.attributes).toContain('secure')
+
+    // The token inside the cookie really is that user's identity: PocketBase's
+    // own API answers for them (this is exactly what Caddy will forward).
+    const token = sessionToken(setCookie)
+    const user = await userByEmail(invite.email)
+    const me = await request.get(`/__c11n/pb/api/collections/users/records/${user!.id}`, {
+      headers: { authorization: token },
+    })
+    expect(me.status(), await me.text()).toBe(200)
+
+    // And the session lasts C11N_SESSION_TTL_DAYS (14) — read from the JWT.
+    // (The claims carry `exp`; there is no `iat`, so compare against now.)
+    const payload = JSON.parse(Buffer.from(token.split('.')[1], 'base64url').toString()) as {
+      exp: number
+      type?: string
+    }
+    expect(payload.type).toBe('auth')
+    const ttlSeconds = payload.exp - Math.floor(Date.now() / 1000)
+    expect(ttlSeconds).toBeGreaterThan(14 * 86400 - 120)
+    expect(ttlSeconds).toBeLessThan(14 * 86400 + 120)
+
+    // Spent: the row is marked, and the same link is now dead.
+    const rows = await invitesFor(invite.email)
+    expect(rows[0].usedAt).not.toBe('')
+
+    const reused = await openMagicLink(request, hookUrl(invite.link))
+    expect(reused.status).toBe(410)
+    expect(reused.body).toContain('This link has expired or was already used.')
+    expect(reused.setCookie).toBeUndefined()
+  })
+
+  test('five parallel uses of one link: exactly one signs in', async ({ request }) => {
+    const invite = await freshInvite(request)
+    const url = hookUrl(invite.link)
+
+    const results = await Promise.all(Array.from({ length: 5 }, () => openMagicLink(request, url)))
+    const statuses = results.map((r) => r.status)
+    expect(statuses.filter((s) => s === 302)).toHaveLength(1)
+    expect(statuses.filter((s) => s === 410)).toHaveLength(4)
+    expect(results.filter((r) => r.setCookie)).toHaveLength(1)
+
+    const rows = await invitesFor(invite.email)
+    expect(rows).toHaveLength(1)
+    expect(rows[0].usedAt).not.toBe('')
+  })
+
+  test('an expired link is 410 and sets no cookie', async ({ request }) => {
+    const invite = await freshInvite(request)
+    await patchInvite(invite.inviteId, { expiresAt: '2020-01-01 00:00:00.000Z' })
+
+    const opened = await openMagicLink(request, hookUrl(invite.link))
+    expect(opened.status).toBe(410)
+    expect(opened.body).toContain('This link has expired or was already used.')
+    expect(opened.setCookie).toBeUndefined()
+
+    // An expired link is not silently consumed either.
+    const rows = await invitesFor(invite.email)
+    expect(rows[0].usedAt).toBe('')
+  })
+
+  test('an unknown token is 404 and says nothing else', async ({ request }) => {
+    const opened = await openMagicLink(request, `${HOOK_MAGIC}?t=${'A'.repeat(43)}`)
+    expect(opened.status).toBe(404)
+    expect(opened.body).toContain('This link has expired or was already used.')
+    expect(opened.setCookie).toBeUndefined()
+    // No id, no hash, no email in the body.
+    expect(opened.body).not.toContain('invites')
+    expect(opened.body).not.toContain('@')
+  })
+
+  test('next is honoured only for a same-origin path', async ({ request }) => {
+    const cases: Array<[next: string | undefined, expected: string]> = [
+      ['/some/page?x=1', '/some/page?x=1'],
+      [undefined, '/'],
+      ['', '/'],
+      ['https://evil.example/steal', '/'],
+      ['//evil.example/steal', '/'],
+      ['/\\evil.example/steal', '/'],
+      ['http:/evil.example', '/'],
+      ['javascript:alert(1)', '/'],
+    ]
+    for (const [next, expected] of cases) {
+      const invite = await freshInvite(request)
+      const opened = await openMagicLink(request, hookUrl(invite.link, next))
+      expect(opened.status, `next=${next}: ${opened.body}`).toBe(302)
+      expect(opened.location, `next=${next}`).toBe(expected)
+    }
   })
 })

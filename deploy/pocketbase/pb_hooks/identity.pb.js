@@ -151,3 +151,113 @@ routerAdd("POST", "/api/c11n/invite", (e) => {
     role: role,
   })
 })
+
+// ---- 3.4: GET /api/c11n/auth/magic — the callback --------------------------
+// Public (no auth): the token in the URL is the credential. Caddy rewrites
+// /__c11n/auth/magic here in 3.8; until then the route is reached under the
+// /__c11n/pb prefix.
+//
+// Single use is enforced by ONE conditional UPDATE, not by read-then-save:
+// `usedAt` is only written when it is still empty, and the affected-row count
+// says whether this call won. SQLite serialises writers, so with N parallel
+// uses exactly one gets 1 and the rest get 0 — a transaction around
+// read+save would instead let several readers see the row unused and then
+// collide on the write (SQLITE_BUSY, which surfaces as a 500, not a 410).
+//
+// Note for anyone editing the SQL: PocketBase stores an unset date as '' (not
+// NULL), so `usedAt IS NULL` alone never matches a fresh invite (verified: the
+// first version of this route claimed nothing and every link looked unused).
+//
+// The link is marked used BEFORE the session is minted. If minting then fails
+// the link is spent — the safer failure: a retry costs the user one more link,
+// while the reverse order would leave a window where a token works twice.
+routerAdd("GET", "/api/c11n/auth/magic", (e) => {
+  const page = (status) => {
+    e.html(
+      status,
+      '<!doctype html><html lang="en"><head><meta charset="utf-8">' +
+        '<meta name="viewport" content="width=device-width,initial-scale=1">' +
+        "<title>c11n — link no longer works</title>" +
+        "<style>body{margin:0;min-height:100vh;display:grid;place-items:center;background:#111;color:#eee;" +
+        "font:16px/1.5 system-ui,sans-serif}main{max-width:32rem;padding:2rem}h1{font-size:1.25rem;margin:0 0 .75rem}" +
+        "p{margin:0;color:#bbb}</style></head><body><main><h1>This link no longer works</h1>" +
+        "<p>This link has expired or was already used. Ask your project contact for a new one.</p>" +
+        "</main></body></html>"
+    )
+  }
+
+  const rawToken = (e.request.url.query().get("t") || "").trim()
+  if (!rawToken) {
+    return page(404)
+  }
+
+  let invite = null
+  try {
+    invite = e.app.findFirstRecordByFilter("invites", "tokenHash = {:h}", { h: $security.sha256(rawToken) })
+  } catch (err) {
+    // "no rows in result set" — an unknown token is indistinguishable from a
+    // deleted one, and both answer the same page.
+    invite = null
+  }
+  if (!invite) {
+    return page(404)
+  }
+
+  const usedAt = String(invite.get("usedAt") || "")
+  const expiresAtMs = new Date(invite.get("expiresAt")).getTime()
+  if (usedAt || !(expiresAtMs > Date.now())) {
+    return page(410)
+  }
+
+  const claimed = e.app
+    .db()
+    .newQuery("UPDATE invites SET usedAt = {:now} WHERE id = {:id} AND (usedAt IS NULL OR usedAt = '')")
+    .bind({ now: new Date().toISOString(), id: invite.id })
+    .execute()
+  if (claimed.rowsAffected() !== 1) {
+    // Someone else won the race between the read above and this write.
+    return page(410)
+  }
+
+  let user = null
+  try {
+    user = e.app.findRecordById("users", invite.get("user"))
+  } catch (err) {
+    user = null
+  }
+  if (!user) {
+    return page(410)
+  }
+
+  // Session token: a real PocketBase auth token for the user, minted
+  // server-side. `newStaticAuthToken` takes a Go time.Duration, i.e.
+  // NANOseconds (a bare 60 is 60ns and mints an already-expired token), and it
+  // is non-refreshable — which is what we want: the cookie's lifetime is the
+  // session's lifetime, decided here from C11N_SESSION_TTL_DAYS.
+  const ttlDays = Number($os.getenv("C11N_SESSION_TTL_DAYS") || "14")
+  const token = user.newStaticAuthToken(ttlDays * 86400 * 1000000000)
+
+  // C11N_COOKIE_SECURE defaults to true; the local e2e stack runs over plain
+  // http on 127.0.0.1 and stack.sh sets it to false there.
+  const secure = ($os.getenv("C11N_COOKIE_SECURE") || "true") !== "false"
+  e.setCookie(
+    new Cookie({
+      name: "c11n_session",
+      value: token,
+      path: "/",
+      maxAge: ttlDays * 86400,
+      secure: secure,
+      httpOnly: true,
+      // 2 is SameSite=Lax (Go's enum: 1 default, 2 lax, 3 strict, 4 none).
+      sameSite: 2,
+    })
+  )
+
+  // `next` is only ever a same-origin path. Absolute URLs, protocol-relative
+  // URLs, backslash tricks (browsers treat /\evil as //evil) and schemes all
+  // fall back to "/".
+  const rawNext = e.request.url.query().get("next") || ""
+  const sameOriginPath =
+    rawNext.charAt(0) === "/" && rawNext.charAt(1) !== "/" && rawNext.indexOf("\\") === -1 && rawNext.indexOf("://") === -1
+  return e.redirect(302, sameOriginPath ? rawNext : "/")
+})

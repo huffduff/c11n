@@ -286,7 +286,26 @@ highest-leverage next step.
 
 ---
 
-## Open questions (they block the success plan)
+## Follow-up (2026-11-25, same day)
+
+Tom answered the questions below. His answers and the resulting decisions
+are in `docs/adr/` (0001–0008). The success plan is
+`.kilo/plans/2026-11-25-c11n-dogfood.md`.
+
+Cleanup done:
+
+- All 6 merged branches were deleted. Their tips are logged in
+  `docs/adr/README.md`.
+- Automatic head-branch deletion is on.
+- The reboot plan was archived to `.kilo/plans/archive/`, not
+  `docs/history/` as suggested above, so it stays next to the plans it
+  belongs with.
+
+The B2 fix (`onRecordCreateExecute` plus `e.app`) and the B1 fix (TLS
+skip-verify as an opt-in Caddy snippet) were both checked against the real
+binaries. See plan tasks 1.1 and 2.2.
+
+## Open questions (answered, see above)
 
 1. **Who is c11n for?** For example: your own team reviewing your own apps,
    an agency reviewing client sites, an open-source self-host tool, or a

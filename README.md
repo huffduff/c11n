@@ -52,8 +52,16 @@ npm test
 
 ## Status
 
-🚧 Rebooted 2026-08-19 — see `.kilo/plans/2026-08-19-c11n-reboot.md`. The
-previous iframe/Go prototype lives in git history before this point.
+🚧 **Not yet usable.** As of 2026-11-25, `main` is green in CI but broken at
+runtime: the default Caddy config fails for `http://` upstreams, and
+creating a comment deadlocks PocketBase. See
+[the assessment](docs/assessment/2026-11-25-state-of-the-repo.md).
+
+- **Working plan:** `.kilo/plans/2026-11-25-c11n-dogfood.md`. The target is
+  dogfooding on one client project.
+- **Decisions:** [`docs/adr/`](docs/adr/README.md)
+- **History:** the 2026-08-19 reboot plan is in `.kilo/plans/archive/`. The
+  iframe/Go prototype before it is in git history.
 
 ## License
 

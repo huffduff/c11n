@@ -25,6 +25,10 @@ test.describe('proxy contract', () => {
     expect(html.status()).toBe(200)
     const body = await html.text()
     expect(body).toContain(overlayTag)
+    // A gated page must not be replayable from cache once the session ends
+    // (regression: the go fixture's HTML came back from heuristic caching
+    // after logout and skipped the gate).
+    expect(html.headers()['cache-control']).toContain('no-store')
 
     // A JS module the site itself loads: the proxy must not rewrite non-HTML
     // bodies, even when the client sends the catch-all Accept header. Derived

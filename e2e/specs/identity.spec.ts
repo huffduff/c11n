@@ -5,6 +5,7 @@ import {
   createUserWithRole,
   inviteAs,
   invitesFor,
+  isolatedRequest,
   openMagicLink,
   parseSetCookie,
   patchInvite,
@@ -361,5 +362,132 @@ test.describe('3.4 magic-link callback', () => {
       expect(opened.status, `next=${next}: ${opened.body}`).toBe(302)
       expect(opened.location, `next=${next}`).toBe(expected)
     }
+  })
+})
+
+/** A live session for a brand-new user of `role`, plus its raw cookie value. */
+async function sessionFor(
+  request: APIRequestContext,
+  role: 'owner' | 'team' | 'client' | 'agent' = 'client',
+): Promise<{ cookie: string; token: string; user: { id: string; email: string; name: string; role?: string } }> {
+  const invite = await freshInvite(request, role)
+  const opened = await openMagicLink(request, hookUrl(invite.link))
+  expect(opened.status, opened.body).toBe(302)
+  const token = sessionToken(opened.setCookie!)
+  const user = (await userByEmail(invite.email))!
+  return { cookie: `c11n_session=${token}`, token, user }
+}
+
+test.describe('3.6 session, me and logout', () => {
+  test('a valid session is 200 with X-C11n-User and X-C11n-Role', async ({ request }) => {
+    const { cookie, user } = await sessionFor(request, 'client')
+    const res = await request.get('/__c11n/pb/api/c11n/session', { headers: { cookie } })
+    expect(res.status(), await res.text()).toBe(200)
+    expect(res.headers()['x-c11n-user']).toBe(user.id)
+    expect(res.headers()['x-c11n-role']).toBe('client')
+  })
+
+  test('the role header follows the user, not the invite', async ({ request }) => {
+    const { cookie, user } = await sessionFor(request, 'team')
+    const res = await request.get('/__c11n/pb/api/c11n/session', { headers: { cookie } })
+    expect(res.headers()['x-c11n-role']).toBe('team')
+    expect(res.headers()['x-c11n-user']).toBe(user.id)
+  })
+
+  test('no session: 302 to the sign-in page for HTML, 401 otherwise', async ({ request }) => {
+    const html = await request.get('/__c11n/pb/api/c11n/session', {
+      headers: { accept: 'text/html,application/xhtml+xml', 'x-forwarded-uri': '/some/page?x=1' },
+      maxRedirects: 0,
+    })
+    expect(html.status()).toBe(302)
+    const location = html.headers()['location']
+    expect(location.startsWith('/__c11n/auth/?next=')).toBe(true)
+    // The original URI travels as an encoded parameter, not as part of the path.
+    expect(decodeURIComponent(location.slice('/__c11n/auth/?next='.length))).toBe('/some/page?x=1')
+
+    const nonHtml = await request.get('/__c11n/pb/api/c11n/session', { headers: { accept: '*/*' }, maxRedirects: 0 })
+    expect(nonHtml.status()).toBe(401)
+  })
+
+  test('a forged or malformed cookie is not a session', async ({ request }) => {
+    for (const value of ['garbage', 'a.b.c', 'Bearer junk']) {
+      const html = await request.get('/__c11n/pb/api/c11n/session', {
+        headers: { accept: 'text/html', cookie: `c11n_session=${value}` },
+        maxRedirects: 0,
+      })
+      expect(html.status(), value).toBe(302)
+
+      const json = await request.get('/__c11n/pb/api/c11n/session', {
+        headers: { accept: 'application/json', cookie: `c11n_session=${value}` },
+        maxRedirects: 0,
+      })
+      expect(json.status(), value).toBe(401)
+    }
+  })
+
+  test('a superuser token in the cookie is not a session', async ({ request }) => {
+    // findAuthRecordByToken(token, 'auth') also accepts _superusers tokens and
+    // returns that record; the route must reject anything that is not a users
+    // record, or the proxy gate would accept an admin token as a session.
+    const su = await superuserTokenFor()
+    const res = await request.get('/__c11n/pb/api/c11n/session', {
+      headers: { accept: 'application/json', cookie: `c11n_session=${su}` },
+      maxRedirects: 0,
+    })
+    expect(res.status()).toBe(401)
+  })
+
+  test('a cookie for another origin does not leak into the URI-based redirect', async ({ request }) => {
+    // Without X-Forwarded-Uri (a direct call) the redirect falls back to the
+    // request's own URI, never to an attacker-supplied string.
+    const res = await request.get('/__c11n/pb/api/c11n/session?evil=1', {
+      headers: { accept: 'text/html' },
+      maxRedirects: 0,
+    })
+    expect(res.status()).toBe(302)
+    const location = res.headers()['location']
+    expect(decodeURIComponent(location.slice(location.indexOf('next=') + 5))).toBe('/api/c11n/session?evil=1')
+  })
+
+  test('me answers from the bearer token and from the cookie', async ({ request }) => {
+    const { cookie, token, user } = await sessionFor(request, 'client')
+
+    for (const headers of [{ authorization: token }, { authorization: `Bearer ${token}` }, { cookie }]) {
+      const res = await request.get('/__c11n/pb/api/c11n/me', { headers })
+      expect(res.status(), JSON.stringify(headers) + ' ' + (await res.text())).toBe(200)
+      expect(await res.json()).toEqual({ id: user.id, email: user.email, name: user.name, role: 'client' })
+    }
+
+    // Anonymous and superuser checks run in a context with its own cookie jar:
+    // the shared `request` fixture still holds the session cookie set above.
+    const anon = await isolatedRequest()
+    try {
+      const anonymous = await anon.get('/__c11n/pb/api/c11n/me')
+      expect(anonymous.status()).toBe(401)
+
+      // A superuser is not a c11n user.
+      const asSuperuser = await anon.get('/__c11n/pb/api/c11n/me', {
+        headers: { authorization: await superuserTokenFor() },
+      })
+      expect(asSuperuser.status()).toBe(401)
+    } finally {
+      await anon.dispose()
+    }
+  })
+
+  test('logout clears the cookie with Max-Age=0 and the same attributes', async ({ request }) => {
+    const { cookie } = await sessionFor(request, 'client')
+    const res = await request.post('/__c11n/pb/api/c11n/auth/logout', { headers: { cookie } })
+    expect(res.status(), await res.text()).toBe(204)
+
+    const setCookie = res.headers()['set-cookie']
+    expect(setCookie).toBeTruthy()
+    const parsed = parseSetCookie(setCookie)
+    expect(parsed.name).toBe('c11n_session')
+    expect(parsed.value).toBe('')
+    expect(parsed.attributes).toContain('max-age=0')
+    expect(parsed.attributes).toContain('path=/')
+    expect(parsed.attributes).toContain('httponly')
+    expect(parsed.attributes).toContain('samesite=lax')
   })
 })

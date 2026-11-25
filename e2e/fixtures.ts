@@ -444,3 +444,14 @@ export async function patchInvite(id: string, data: Record<string, unknown>): Pr
   })
   if (!res.ok()) throw new Error(`patchInvite -> ${res.status()} ${await res.text()}`)
 }
+
+/**
+ * A request context with its OWN cookie jar. The `request` fixture is shared by
+ * every call in a spec file, and Playwright stores Set-Cookie responses in it —
+ * so a spec that signs in and then asserts "anonymous gets 401" would carry the
+ * session cookie and pass for the wrong reason.
+ */
+export async function isolatedRequest(): Promise<APIRequestContext> {
+  const creds = readCreds()
+  return request.newContext({ baseURL: creds.baseUrl })
+}

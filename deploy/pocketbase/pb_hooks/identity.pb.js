@@ -261,3 +261,119 @@ routerAdd("GET", "/api/c11n/auth/magic", (e) => {
     rawNext.charAt(0) === "/" && rawNext.charAt(1) !== "/" && rawNext.indexOf("\\") === -1 && rawNext.indexOf("://") === -1
   return e.redirect(302, sameOriginPath ? rawNext : "/")
 })
+
+// ---- 3.6: session, me and logout ------------------------------------------
+// GET  /api/c11n/session       — Caddy forward_auth target (pod-internal when
+//                                the gate lands in 3.8)
+// GET  /api/c11n/me            — what the overlay calls instead of authRefresh
+// POST /api/c11n/auth/logout   — clears the cookie
+//
+// Every route resolves the user from the cookie the same way, and every route
+// rejects anything that is not a `users` record: findAuthRecordByToken(token,
+// "auth") happily accepts a `_superusers` token and returns the admin record
+// (verified on 0.39.11), so without the collection check an admin token in the
+// cookie would be a valid session for the proxy gate.
+routerAdd("GET", "/api/c11n/session", (e) => {
+  // Manual Cookie parsing: e.request.cookie(name) signals "not found" with an
+  // error rather than null, which is awkward to tell apart from a bad token.
+  const cookieHeader = e.request.header.get("Cookie") || ""
+  let sessionToken = ""
+  const parts = cookieHeader.split(";")
+  for (let i = 0; i < parts.length; i++) {
+    const part = parts[i].trim()
+    if (part.indexOf("c11n_session=") === 0) {
+      sessionToken = part.slice("c11n_session=".length)
+    }
+  }
+
+  let user = null
+  if (sessionToken) {
+    try {
+      const record = e.app.findAuthRecordByToken(sessionToken, "auth")
+      if (record && record.collection().name === "users") {
+        user = record
+      }
+    } catch (err) {
+      user = null
+    }
+  }
+
+  if (user) {
+    e.response.header().set("X-C11n-User", user.id)
+    e.response.header().set("X-C11n-Role", String(user.get("role") || ""))
+    return e.json(200, { id: user.id, role: String(user.get("role") || "") })
+  }
+
+  const accept = String(e.request.header.get("Accept") || "")
+  const wantsHtml = accept.indexOf("text/html") !== -1
+  if (!wantsHtml) {
+    return e.json(401, { message: "no session" })
+  }
+
+  // Caddy's forward_auth sets X-Forwarded-Uri to the ORIGINAL request URI; a
+  // direct call has no such header, so fall back to this request's own URI.
+  let originalUri = String(e.request.header.get("X-Forwarded-Uri") || "")
+  if (!originalUri) {
+    const rawQuery = String(e.request.url.rawQuery || "")
+    originalUri = e.request.url.path + (rawQuery ? "?" + rawQuery : "")
+  }
+  return e.redirect(302, "/__c11n/auth/?next=" + encodeURIComponent(originalUri))
+})
+
+routerAdd("GET", "/api/c11n/me", (e) => {
+  let token = ""
+  const authorization = String(e.request.header.get("Authorization") || "")
+  if (authorization.toLowerCase().indexOf("bearer ") === 0) {
+    token = authorization.slice("bearer ".length).trim()
+  } else if (authorization) {
+    token = authorization.trim()
+  }
+  if (!token) {
+    // Same cookie the session route reads: the overlay's browser sends it.
+    const cookieHeader = String(e.request.header.get("Cookie") || "")
+    const parts = cookieHeader.split(";")
+    for (let i = 0; i < parts.length; i++) {
+      const part = parts[i].trim()
+      if (part.indexOf("c11n_session=") === 0) {
+        token = part.slice("c11n_session=".length)
+      }
+    }
+  }
+  if (!token) {
+    return e.json(401, { message: "not signed in" })
+  }
+
+  try {
+    const record = e.app.findAuthRecordByToken(token, "auth")
+    if (!record || record.collection().name !== "users") {
+      return e.json(401, { message: "not signed in" })
+    }
+    return e.json(200, {
+      id: record.id,
+      email: String(record.get("email") || ""),
+      name: String(record.get("name") || ""),
+      role: String(record.get("role") || ""),
+    })
+  } catch (err) {
+    return e.json(401, { message: "not signed in" })
+  }
+})
+
+routerAdd("POST", "/api/c11n/auth/logout", (e) => {
+  // Max-Age=0 with the same name/path/attributes as the session cookie: a
+  // cookie is only cleared when every attribute matches.
+  const secure = ($os.getenv("C11N_COOKIE_SECURE") || "true") !== "false"
+  e.setCookie(
+    new Cookie({
+      name: "c11n_session",
+      value: "",
+      path: "/",
+      maxAge: -1,
+      secure: secure,
+      httpOnly: true,
+      sameSite: 2,
+    })
+  )
+  // 204: nothing for the overlay to render; the cookie is the whole response.
+  return e.noContent(204)
+})

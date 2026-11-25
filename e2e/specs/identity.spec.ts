@@ -452,7 +452,11 @@ test.describe('3.6 session, me and logout', () => {
   test('me answers from the bearer token and from the cookie', async ({ request }) => {
     const { cookie, token, user } = await sessionFor(request, 'client')
 
-    for (const headers of [{ authorization: token }, { authorization: `Bearer ${token}` }, { cookie }]) {
+    for (const headers of [
+      { authorization: token },
+      { authorization: `Bearer ${token}` },
+      { cookie },
+    ] as Array<Record<string, string>>) {
       const res = await request.get('/__c11n/pb/api/c11n/me', { headers })
       expect(res.status(), JSON.stringify(headers) + ' ' + (await res.text())).toBe(200)
       expect(await res.json()).toEqual({ id: user.id, email: user.email, name: user.name, role: 'client' })

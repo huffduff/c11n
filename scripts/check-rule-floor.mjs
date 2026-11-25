@@ -167,10 +167,13 @@ async function main() {
   if (!project) throw new Error('no seeded `default` project — did the migrations run?')
   const otherProject = (await api('POST', '/api/collections/projects/records', { token: su, data: { name: 'other', slug: `other-${Date.now()}` } })).json.id
 
+  // `role` is required since the Phase 3 identity migration, and this script
+  // runs with an EMPTY hooks dir on purpose — so the hook that defaults it is
+  // not there and it has to be passed explicitly.
   const makeUser = async (name) =>
     (await api('POST', '/api/collections/users/records', {
       token: su,
-      data: { email: `${name}-${Date.now()}@c11n.test`, password: PASSWORD, passwordConfirm: PASSWORD, name },
+      data: { email: `${name}-${Date.now()}@c11n.test`, password: PASSWORD, passwordConfirm: PASSWORD, name, role: 'client' },
     })).json
   const alice = await makeUser('alice')
   const bob = await makeUser('bob')

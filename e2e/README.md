@@ -61,6 +61,32 @@ env -u PLAYWRIGHT_BROWSERS_PATH npm run e2e
 Do not bake this into `package.json` or the config: CI uses the normal browser
 resolution and would break.
 
+## Identity specs (Phase 3)
+
+`specs/identity.spec.ts` covers the backend half of ADR 0006/0008: the
+bootstrap owner (3.2), `POST /api/c11n/invite` (3.3), the magic-link callback
+(3.4) and `session`/`me`/`logout` (3.6). It is API-level on purpose — the Caddy
+gate and the sign-in page land in a later batch, so the specs call the hook
+routes through the existing `/__c11n/pb` proxy and swap the
+`/__c11n/auth/magic` prefix on the returned links.
+
+The bootstrap link is read from `.stack/pocketbase.log` (it is the only copy of
+the token; `pb_hooks/bootstrap.pb.js` logs it so an operator can find it with
+`kubectl logs`). Env knobs the specs rely on, all with production defaults and
+overridden by `scripts/stack.sh` for the local stack:
+
+| var | default | local stack |
+| --- | --- | --- |
+| `C11N_OWNER_EMAIL` | unset (hint logged) | `owner@c11n.test` |
+| `C11N_PUBLIC_URL` | request origin | `http://127.0.0.1:18080` |
+| `C11N_LINK_TTL_HOURS` | 72 | 72 |
+| `C11N_SESSION_TTL_DAYS` | 14 | 14 |
+| `C11N_COOKIE_SECURE` | true | true (the cookie is asserted as `Secure`) |
+
+The `request` fixture shares one cookie jar across a spec file: use
+`isolatedRequest()` from `fixtures.ts` for the "anonymous gets 401" assertions,
+or they pass for the wrong reason after an earlier sign-in.
+
 ## Reading the results
 
 `--reporter=list` prints one line per spec. Three markers besides a plain pass:

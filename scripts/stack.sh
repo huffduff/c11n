@@ -32,6 +32,8 @@ CADDY_PORT=18080
 ADMIN_EMAIL="e2e-admin@c11n.test"
 SERVICES="pocketbase demo caddy"
 START_TIMEOUT="${C11N_STACK_TIMEOUT:-30}"
+# Set to 1 only once `up` has every service healthy; the EXIT trap reads it.
+C11N_UP_OK=0
 
 log() { printf '%s\n' "$*" >&2; }
 die() {
@@ -92,35 +94,45 @@ preflight_ports() {
 }
 
 # start_service <name> <command...>
-# Runs the command in its own session (so the whole tree - npx -> node -> vite,
-# and any shell wrapper - shares one process group), logging to <name>.log.
+# Runs the command in its own session (so the whole tree - node -> vite, and
+# any shell wrapper - shares one process group), logging to <name>.log.
+# setsid is required: without it the child never becomes a process-group
+# leader, so `down` could not kill the whole tree safely.
 start_service() {
 	local name="$1"
 	shift
-	local log_path pidfile pid pgid
+	local log_path pidfile pid pgid i
 	log_path="$(log_file "$name")"
 	pidfile="$(pid_file "$name")"
 
 	: >"$log_path"
-	if command -v setsid >/dev/null 2>&1; then
-		setsid nohup "$@" >>"$log_path" 2>&1 <"/dev/null" &
-	else
-		log "warning: setsid not found; child processes may outlive 'down'"
-		nohup "$@" >>"$log_path" 2>&1 <"/dev/null" &
-	fi
+	setsid nohup "$@" >>"$log_path" 2>&1 <"/dev/null" &
 	pid=$!
 	printf '%s\n' "$pid" >"$pidfile"
 
 	# In a non-interactive shell the child is not a group leader, so setsid
 	# execs in place and $! is the new session/group leader. If that ever
 	# stops holding, fail loudly instead of killing the wrong group later.
-	sleep 0.3
-	pgid="$(pgid_of "$pid" || true)"
+	# Poll: the pgid read can lag the fork by a few ms, and a service that
+	# exits this early must be reported as such, not as a pgid mismatch.
+	pgid=""
+	for i in $(seq 1 20); do
+		if ! is_alive "$pid"; then
+			printf 'error: %s exited during startup (pid %s)\n' "$name" "$pid" >&2
+			log "---- $log_path (tail) ----"
+			tail -n 40 "$log_path" >&2 || true
+			return 1
+		fi
+		pgid="$(pgid_of "$pid" || true)"
+		[ "$pgid" = "$pid" ] && break
+		sleep 0.1
+	done
 	if [ "$pgid" != "$pid" ]; then
 		printf 'error: %s did not start in its own process group (pid=%s pgid=%s)\n' \
 			"$name" "$pid" "${pgid:-gone}" >&2
+		log "---- $log_path (tail) ----"
 		tail -n 40 "$log_path" >&2 || true
-		exit 1
+		return 1
 	fi
 	log "$name: started (pid $pid, log $log_path)"
 }
@@ -174,6 +186,19 @@ running_services() {
 	return 0
 }
 
+# up_cleanup: EXIT trap while `up` runs. A failure after the first service
+# starts would otherwise leave it (and its port) behind, and the next `up`
+# would refuse to start. Every failure path therefore ends in `down`.
+up_cleanup() {
+	local status=$?
+	trap - EXIT
+	if [ "${C11N_UP_OK:-0}" -ne 1 ]; then
+		log "startup failed; stopping services that did start"
+		cmd_down || true
+	fi
+	exit "$status"
+}
+
 cmd_up() {
 	local svc pid pw pb caddy running
 	running="$(running_services | tr '\n' ' ')"
@@ -185,8 +210,14 @@ cmd_up() {
 	# stack whose pidfiles we cannot see), and adopting it is worse than failing.
 	preflight_ports
 
+	command -v setsid >/dev/null 2>&1 ||
+		die "setsid is required (util-linux): each service must run in its own process group so 'down' can stop its whole tree"
+
 	[ -f "$REPO_ROOT/packages/overlay/dist/overlay.js" ] ||
 		die "packages/overlay/dist/overlay.js is missing; run 'npm run build' at the repo root"
+
+	C11N_UP_OK=0
+	trap up_cleanup EXIT
 
 	pb="$(pocketbase_bin)"
 	caddy="$(caddy_bin)"
@@ -225,15 +256,13 @@ cmd_up() {
 		--dir "$STATE_DIR/pb_data" \
 		--migrationsDir "$STATE_DIR/pb_migrations" \
 		--hooksDir "$STATE_DIR/pb_hooks"
-	wait_for pocketbase "http://127.0.0.1:$PB_PORT/api/health" ||
-		{ cmd_down || true; exit 1; }
+	wait_for pocketbase "http://127.0.0.1:$PB_PORT/api/health"
 
 	(
 		cd "$REPO_ROOT/examples/demo-vue"
 		start_service demo npx vite --host 127.0.0.1 --port "$DEMO_PORT" --strictPort
 	)
-	wait_for demo "http://127.0.0.1:$DEMO_PORT/" ||
-		{ cmd_down || true; exit 1; }
+	wait_for demo "http://127.0.0.1:$DEMO_PORT/"
 
 	(
 		export C11N_LISTEN=":$CADDY_PORT"
@@ -247,13 +276,14 @@ cmd_up() {
 			--config "$REPO_ROOT/deploy/Caddyfile" \
 			--adapter caddyfile
 	)
-	wait_for caddy "http://127.0.0.1:$CADDY_PORT/__c11n/pb/api/health" ||
-		{ cmd_down || true; exit 1; }
+	wait_for caddy "http://127.0.0.1:$CADDY_PORT/__c11n/pb/api/health"
 
 	log "caddy:      http://127.0.0.1:$CADDY_PORT (overlay + proxied PocketBase)"
 	log "pocketbase: http://127.0.0.1:$PB_PORT (admin: /_/)"
 	log "demo:       http://127.0.0.1:$DEMO_PORT"
 	log "credentials: $STATE_DIR/creds.json (superuser $ADMIN_EMAIL)"
+	C11N_UP_OK=1
+	trap - EXIT
 	log "stack is up"
 }
 

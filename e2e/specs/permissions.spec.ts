@@ -177,11 +177,14 @@ test.describe('comments — rule still separates authors from resolvers', () => 
     expect((await listComments()).find((c) => c.id === comment.id)?.body).toBe('do not touch')
   })
 
-  test('bob (non-author) can toggle resolved (allowed until Phase 3 roles)', async ({ request }) => {
+  // Task 3.10 tightened this cell: resolve/reopen is owner and team on any
+  // thread, a client on its own only (the client cell lives in
+  // e2e/specs/permissions-matrix.spec.ts). A team member is a resolver.
+  test('team (non-author) can toggle resolved', async ({ request }) => {
     const alice = await createUser(undefined, 'Alice')
-    const bob = await createUser(undefined, 'Bob')
+    const bob = await createUser(undefined, 'Bob', 'team')
     const comment = await seedComment({ author: alice.id, body: 'resolve me' })
-    const bobCookie = await sessionCookie(bob.email)
+    const bobCookie = await sessionCookie(bob.email, 'team')
 
     const res = await patch(request, `${PB}/api/collections/comments/records/${comment.id}`, { resolved: true }, bobCookie)
     expect(res.status(), await res.text()).toBe(200)

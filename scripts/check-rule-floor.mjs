@@ -10,13 +10,21 @@
 // CI run in the e2e job, next to the pinned PocketBase it already fetched.
 //
 // What it proves:
-//   1. the applied `comments.updateRule` carries the author/project/seq floor
-//      (so a later migration cannot silently drop it);
+//   1. the applied rules carry the ADR 0008 role matrix: list/view require a
+//      role, `comments.updateRule` keeps the author/project/seq floor and the
+//      role branches for resolve/reopen (so a later migration cannot silently
+//      drop them);
 //   2. with an empty hooks dir, a non-author PATCH {author: X} / {seq: n} /
 //      {project: p} is rejected by the rule (404), i.e. the fields cannot be
 //      written at all;
-//   3. a non-author PATCH {resolved: true} still succeeds (200) — the rule is
-//      not blanket-deny, so (2) means what it says.
+//   3. an owner (non-author) PATCH {resolved: true} still succeeds (200) — the
+//      rule is not blanket-deny, so (2) means what it says;
+//   4. the role cells the matrix tightens hold on the rule alone:
+//        - a client cannot resolve someone else's thread (404);
+//        - an agent cannot create a top-level comment (400 — PocketBase
+//          answers a create-rule denial with 400, not 403);
+//        - a non-owner cannot delete someone else's comment (404), while an
+//          owner can (204).
 //
 // Usage: node scripts/check-rule-floor.mjs [--keep] [--port 28095]
 //   POCKETBASE_BIN overrides the binary; otherwise .tools/pocketbase, else
@@ -160,6 +168,32 @@ async function main() {
     check(rule.includes(`@request.body.${field}:isset = false`), `updateRule requires ${field} to be unset for non-authors`)
   }
 
+  // ADR 0008: list/view are role-gated (no role-less token reads anything) and
+  // the owner/team branch is what lets a non-author resolve. Agent is kept out
+  // of the author branch's `resolved` field.
+  const listRule = String(collection.json?.listRule ?? '')
+  const viewRule = String(collection.json?.viewRule ?? '')
+  console.log('applied listRule:', listRule)
+  for (const [name, value] of [
+    ['comments.listRule', listRule],
+    ['comments.viewRule', viewRule],
+  ]) {
+    check(value.includes('@request.auth.role != ""'), `${name} requires an authenticated role`)
+  }
+  check(rule.includes('@request.auth.role = "owner"'), 'comments.updateRule has an owner branch')
+  check(rule.includes('@request.auth.role = "team"'), 'comments.updateRule has a team branch')
+  check(rule.includes('@request.auth.role != "agent"'), 'comments.updateRule keeps the agent out of resolve')
+
+  const repliesCollection = await api('GET', '/api/collections/replies', { token: su })
+  check(
+    String(repliesCollection.json?.listRule ?? '').includes('@request.auth.role != ""'),
+    'replies.listRule requires an authenticated role',
+  )
+
+  const commentsCreateRule = String(collection.json?.createRule ?? '')
+  console.log('applied createRule:', commentsCreateRule)
+  check(commentsCreateRule.includes('@request.auth.role != "agent"'), 'comments.createRule refuses the agent')
+
   // C1: `users` carries the same kind of floor. Without it, this script's
   // empty hooks dir means a self-promotion PATCH is allowed by the rule —
   // which is the exact deployment hole the migration closes.
@@ -185,13 +219,15 @@ async function main() {
   // `role` is required since the Phase 3 identity migration, and this script
   // runs with an EMPTY hooks dir on purpose — so the hook that defaults it is
   // not there and it has to be passed explicitly.
-  const makeUser = async (name) =>
+  const makeUser = async (name, role = 'client') =>
     (await api('POST', '/api/collections/users/records', {
       token: su,
-      data: { email: `${name}-${Date.now()}@c11n.test`, password: PASSWORD, passwordConfirm: PASSWORD, name, role: 'client' },
+      data: { email: `${name}-${Date.now()}@c11n.test`, password: PASSWORD, passwordConfirm: PASSWORD, name, role },
     })).json
   const alice = await makeUser('alice')
   const bob = await makeUser('bob')
+  const carol = await makeUser('carol', 'owner')
+  const dave = await makeUser('dave', 'agent')
 
   const comment = (await api('POST', '/api/collections/comments/records', {
     token: su,
@@ -201,30 +237,67 @@ async function main() {
 
   // Password auth is off on `users` (ADR 0006, task 3.9), so a user bearer is
   // minted through the superuser impersonate endpoint.
-  const bobAuth = await api('POST', `/api/collections/users/impersonate/${bob.id}`, {
-    token: su,
-    data: { duration: 3600 },
-  })
-  if (bobAuth.status !== 200) throw new Error(`bob auth -> ${bobAuth.status} ${bobAuth.text}`)
-  const bobToken = bobAuth.json.token
+  const impersonate = async (user) => {
+    const res = await api('POST', `/api/collections/users/impersonate/${user.id}`, {
+      token: su,
+      data: { duration: 3600 },
+    })
+    if (res.status !== 200) throw new Error(`${user.name} auth -> ${res.status} ${res.text}`)
+    return res.json.token
+  }
+  const bobToken = await impersonate(bob)
+  const carolToken = await impersonate(carol)
+  const daveToken = await impersonate(dave)
 
   const patchUrl = `/api/collections/comments/records/${comment.id}`
   const attempts = [
     ['author', { author: bob.id }, 404],
     ['seq', { seq: 2 }, 404],
     ['project', { project: otherProject }, 404],
-    // Control: the same caller, the same route, a field the rule allows.
-    ['resolved', { resolved: true }, 200],
   ]
   for (const [field, data, expected] of attempts) {
     const res = await api('PATCH', patchUrl, { token: bobToken, data })
     check(res.status === expected, `non-author PATCH {${field}} -> ${res.status} (expected ${expected})`)
   }
 
+  // Control: the same route, a caller the role matrix allows (an owner may
+  // resolve any thread). Without this, "denied" could just mean "broken".
+  const ownerResolve = await api('PATCH', patchUrl, { token: carolToken, data: { resolved: true } })
+  check(ownerResolve.status === 200, `owner PATCH {resolved} -> ${ownerResolve.status} (expected 200)`)
+
+  // ADR 0008 cell: a client may only resolve threads it authored.
+  const clientResolve = await api('PATCH', patchUrl, { token: bobToken, data: { resolved: true } })
+  check(clientResolve.status === 404, `client PATCH {resolved} on an author's thread -> ${clientResolve.status} (expected 404)`)
+
+  // ADR 0008 cell: the agent can reply but never opens a top-level comment.
+  const agentComment = await api('POST', '/api/collections/comments/records', {
+    token: daveToken,
+    data: { project, path: '/', selector: '#target', body: 'agent top-level', author: dave.id },
+  })
+  check(agentComment.status === 400, `agent POST a comment -> ${agentComment.status} (expected 400: create-rule denial) ${agentComment.text}`)
+  const agentReply = await api('POST', '/api/collections/replies/records', {
+    token: daveToken,
+    data: { comment: comment.id, body: 'agent reply', author: dave.id },
+  })
+  check(agentReply.status === 200, `agent POST a reply -> ${agentReply.status} (expected 200)`)
+
+  // ADR 0008 cell: delete any comment is the owner's alone.
+  const clientDelete = await api('DELETE', patchUrl, { token: bobToken })
+  check(clientDelete.status === 404, `client DELETE an author's comment -> ${clientDelete.status} (expected 404)`)
+
+  // Control for the delete cell: an owner deletes a comment it does not own.
+  const throwaway = (await api('POST', '/api/collections/comments/records', {
+    token: su,
+    data: { project, path: '/', selector: '#target', body: 'owner may delete me', author: alice.id, seq: 2 },
+  })).json
+  const ownerDelete = await api('DELETE', `/api/collections/comments/records/${throwaway.id}`, { token: carolToken })
+  check(ownerDelete.status === 204, `owner DELETE another author's comment -> ${ownerDelete.status} (expected 204)`)
+
   const after = await api('GET', patchUrl, { token: su })
   check(after.json?.author === alice.id, 'author is unchanged after the rejected PATCH')
   check(Number(after.json?.seq) === 1, `seq is unchanged after the rejected PATCH (got ${after.json?.seq})`)
   check(after.json?.project === project, 'project is unchanged after the rejected PATCH')
+  check(after.json?.resolved === true, 'the owner resolve is what stuck (client and delete attempts changed nothing)')
 
   // C1: the same attack against the account's own record. With an empty hooks
   // dir only the rule stands between a client and the owner role.

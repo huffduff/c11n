@@ -530,9 +530,19 @@ routerAdd("GET", "/api/c11n/session", (e) => {
   }
 
   if (user) {
+    const role = String(user.get("role") || "")
+    // ADR 0008: the agent is API-only. It reads comments through the API and
+    // writes tickets/replies, but it must not browse the reviewed site — so an
+    // HTML document request is refused while every API request still passes.
+    // (forward_auth relays this 403 verbatim; the overlay never loads, which is
+    // the point.)
+    const agentAccept = String(e.request.header.get("Accept") || "")
+    if (role === "agent" && agentAccept.indexOf("text/html") !== -1) {
+      return e.json(403, { message: "the agent role is API-only" })
+    }
     e.response.header().set("X-C11n-User", user.id)
-    e.response.header().set("X-C11n-Role", String(user.get("role") || ""))
-    return e.json(200, { id: user.id, role: String(user.get("role") || "") })
+    e.response.header().set("X-C11n-Role", role)
+    return e.json(200, { id: user.id, role: role })
   }
 
   const accept = String(e.request.header.get("Accept") || "")

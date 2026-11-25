@@ -27,6 +27,8 @@ export interface PbUser {
   id: string
   email: string
   name: string
+  /** Set by the server: 'client' by default (pb_hooks/identity.pb.js). */
+  role?: string
 }
 
 export interface PbComment {
@@ -151,6 +153,90 @@ export async function userToken(email: string, password = 'password123456'): Pro
   })
   const body = await json<{ token: string }>(res)
   return body.token
+}
+
+/**
+ * Create a user with a specific role, as superuser, and return it with a
+ * bearer token. The token comes from password auth, which still works until
+ * task 3.9 — the invite route accepts it exactly like the session cookie it
+ * will later be derived from.
+ */
+export async function createUserWithRole(
+  role: 'owner' | 'team' | 'client' | 'agent',
+  name = `${role} user`,
+): Promise<PbUser & { token: string }> {
+  const creds = readCreds()
+  const email = `e2e-${role}-${Date.now()}-${userSeq++}@c11n.test`
+  const res = await (await ctx()).post(`${creds.pbUrl}/api/collections/users/records`, {
+    headers: { authorization: await superuserTokenFor() },
+    data: { email, password: 'password123456', passwordConfirm: 'password123456', name, role },
+  })
+  const user = await json<PbUser>(res)
+  return { ...user, token: await userToken(email) }
+}
+
+export interface InviteResult {
+  status: number
+  /** Present on success (task 3.3 always returns the link). */
+  link?: string
+  expiresAt?: string
+  text: string
+}
+
+/**
+ * POST /api/c11n/invite through the proxy. `token` null means "call as
+ * superuser" (the only caller allowed to do anything at all, per ADR 0008).
+ */
+export async function inviteAs(
+  request: APIRequestContext,
+  token: string | null,
+  email: string,
+  role: string,
+): Promise<InviteResult> {
+  const headers: Record<string, string> = token ? { authorization: token } : { authorization: await superuserTokenFor() }
+  const res = await request.post('/__c11n/pb/api/c11n/invite', { headers, data: { email, role } })
+  const text = await res.text()
+  let body: { link?: string; expiresAt?: string } = {}
+  try {
+    body = text ? JSON.parse(text) : {}
+  } catch {
+    // error pages are HTML
+  }
+  return { status: res.status(), link: body.link, expiresAt: body.expiresAt, text }
+}
+
+export interface InviteRow {
+  id: string
+  email: string
+  role: string
+  user: string
+  invitedBy: string
+  tokenHash: string
+  expiresAt: string
+  usedAt: string
+}
+
+/** Invite rows for one email, newest first (superuser view). */
+export async function invitesFor(email: string): Promise<InviteRow[]> {
+  const creds = readCreds()
+  const res = await (await ctx()).get(
+    `${creds.pbUrl}/api/collections/invites/records?perPage=50&sort=-created&filter=` +
+      encodeURIComponent(`email='${email}'`),
+    { headers: { authorization: await superuserTokenFor() } },
+  )
+  const body = await json<{ items: InviteRow[] }>(res)
+  return body.items
+}
+
+/** A user by email, or undefined (superuser view). */
+export async function userByEmail(email: string): Promise<PbUser | undefined> {
+  const creds = readCreds()
+  const res = await (await ctx()).get(
+    `${creds.pbUrl}/api/collections/users/records?filter=` + encodeURIComponent(`email='${email}'`),
+    { headers: { authorization: await superuserTokenFor() } },
+  )
+  const body = await json<{ items: PbUser[] }>(res)
+  return body.items[0]
 }
 
 async function allRecords(collection: string): Promise<Array<{ id: string }>> {

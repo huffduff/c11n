@@ -249,14 +249,14 @@ export const useCommentsStore = defineStore('comments', {
         onReplyCreate: (reply) => {
           const cached = this.replies.get(reply.comment)
           if (!cached) return // unknown thread — unscoped stream, ignore
-          // Dedupe: our own reply is already appended by addReply.
-          if (!cached.some((r) => r.id === reply.id)) cached.push(backfill(reply))
+          // Same upsert as addReply: whichever of echo/HTTP lands second is
+          // an update, so our own reply never renders twice.
+          this.upsertReply(reply.comment, backfill(reply))
         },
         onReplyUpdate: (reply) => {
           const cached = this.replies.get(reply.comment)
           if (!cached) return
-          const i = cached.findIndex((r) => r.id === reply.id)
-          if (i !== -1) cached[i] = backfill(reply)
+          this.upsertReply(reply.comment, backfill(reply))
         },
         onReplyDelete: (reply) => {
           const cached = this.replies.get(reply.comment)
@@ -335,14 +335,29 @@ export const useCommentsStore = defineStore('comments', {
       this.error = null
       try {
         const rec = await backend.createReply(commentId, body)
-        const cached = this.replies.get(commentId)
-        if (cached) cached.push(rec)
+        // Upsert, not append: the realtime echo of this reply may have landed
+        // first, and a push would render the same reply twice (B5).
+        if (this.replies.has(commentId)) this.upsertReply(commentId, rec)
         else this.replies.set(commentId, [rec])
       } catch {
         this.error = 'Could not save reply'
       } finally {
         this.loading = false
       }
+    },
+
+    /**
+     * Upsert one reply into a thread's cache, replacing the array so every
+     * consumer of `replies.get(id)` re-renders. Unknown threads stay unknown:
+     * the reply stream is project-unscoped, so only cached threads are patched.
+     */
+    upsertReply(commentId: string, reply: ReplyRec) {
+      if (!this.replies.has(commentId)) return
+      const next = [...this.replies.get(commentId)!]
+      const i = next.findIndex((r) => r.id === reply.id)
+      if (i === -1) next.push(reply)
+      else next[i] = reply
+      this.replies.set(commentId, next)
     },
 
     /** Mark resolved in place — PinLayer drops the pin reactively. */

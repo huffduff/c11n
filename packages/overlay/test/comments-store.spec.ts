@@ -431,6 +431,45 @@ describe('useCommentsStore', () => {
       expect(store.replies.get('c1')).toEqual([created])
     })
 
+    // B5: the realtime reply echo and the HTTP response are the same record.
+    // Whichever lands second must be an update, not a second reply.
+    it('keeps one reply when the realtime echo lands before createReply resolves', async () => {
+      const created = replyRec({ id: 'r2', body: 'echo me' })
+      let handlers: RealtimeHandlers = {}
+      const mock = makeMockBackend({
+        listReplies: vi.fn().mockResolvedValue([replyRec({ id: 'r1' })]),
+        subscribe: vi.fn((_project: string, h: RealtimeHandlers) => {
+          handlers = h
+          return () => {}
+        }),
+        createReply: vi.fn(async () => {
+          handlers.onReplyCreate!(created) // echo arrives first
+          return created
+        }),
+      })
+      setBackend(mock)
+      const store = useCommentsStore()
+      store.startRealtime()
+      await store.loadReplies('c1')
+
+      await store.addReply('c1', 'echo me')
+
+      expect(store.replies.get('c1')!.map((r) => r.id)).toEqual(['r1', 'r2'])
+    })
+
+    it('replaces the cached replies array so consumers re-render reactively', async () => {
+      const created = replyRec({ id: 'r2' })
+      setBackend(makeMockBackend({ createReply: vi.fn().mockResolvedValue(created) }))
+      const store = useCommentsStore()
+      await store.loadReplies('c1')
+      const before = store.replies.get('c1')
+
+      await store.addReply('c1', 'echo me')
+
+      expect(store.replies.get('c1')).not.toBe(before)
+      expect(store.replies.get('c1')!.map((r) => r.id)).toEqual(['r2'])
+    })
+
     it('addReply failure sets error and leaves the cache untouched', async () => {
       setBackend(
         makeMockBackend({

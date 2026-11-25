@@ -15,10 +15,9 @@ import {
 /**
  * Core comment flow against the real stack.
  *
- * Specs marked `test.fail()` / `test.fixme()` describe the CORRECT behaviour
- * of a known open bug and stay visible until Phase 2 fixes it:
- *   - reply echo (fixme, 10/10 in isolation): a UI reply renders twice
- * Each becomes a passing spec the moment its fix lands.
+ * All former known-bug markers are fixed: B3 (pins measured on load), B4
+ * (saved comment deduped against its realtime echo) and B5 (ditto for
+ * replies) are plain specs.
  *
  * Pins are `.c11n-pin` inside the overlay's open shadow root; Playwright's CSS
  * locators pierce it.
@@ -227,11 +226,8 @@ test.describe('reply and resolve', () => {
 
       await pageA.locator('.c11n-popover-reply-text').fill('replied by alice')
       await pageA.locator('.c11n-reply-submit').click()
-      // `.first()` on purpose: the reply is currently rendered twice (see the
-      // `rendered once` spec below). This spec is about delivery, not dedupe.
-      await expect(pageA.locator('.c11n-popover-reply-body').first()).toHaveText(
-        'replied by alice',
-      )
+      await expect(pageA.locator('.c11n-popover-reply-body')).toHaveCount(1)
+      await expect(pageA.locator('.c11n-popover-reply-body')).toHaveText('replied by alice')
       expect((await listReplies(seeded.id)).length).toBe(1)
 
       // Bob opens the same thread and sees the reply (fetched on open).
@@ -262,13 +258,7 @@ test.describe('reply and resolve', () => {
     }
   })
 
-  // Found by this harness, not in the assessment: the reply realtime echo is
-  // not deduped the way comments are, so one stored reply can render as two
-  // <li> (1 row in the DB, 2 `.c11n-popover-reply-body` in the DOM).
-  // fixme, not fail: reproduced 10/10 in isolation (--repeat-each=10) but it
-  // also depends on whether the realtime echo beats the HTTP response, and one
-  // full-suite run rendered a single reply — a `test.fail()` would flake.
-  test.fixme('a UI reply is rendered once', async ({ page }) => {
+  test('a UI reply is rendered once', async ({ page }) => {
     const user = await createUser(undefined, 'Reply Echo')
     const seeded = await seedComment({
       author: user.id,

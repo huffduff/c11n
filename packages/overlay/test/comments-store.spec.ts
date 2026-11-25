@@ -354,6 +354,108 @@ describe('useCommentsStore', () => {
     })
   })
 
+  // Review fix: a realtime `delete` can beat the create's HTTP response (e.g.
+  // the author deleted it from another tab). Upserting that response blindly
+  // resurrects a row that no longer exists server-side.
+  describe('records deleted before the create response lands', () => {
+    const replyRec = (overrides: Partial<ReplyRec> = {}): ReplyRec => ({
+      id: 'r2',
+      comment: 'c1',
+      body: 'gone already',
+      author: 'u1',
+      authorName: 'Tom',
+      created: '2026-08-19 10:05:00',
+      ...overrides,
+    })
+
+    it('does not resurrect a comment whose delete echo arrived first', async () => {
+      const saved = rec({ id: 'c-new', body: 'deleted meanwhile' })
+      let handlers: RealtimeHandlers = {}
+      setBackend(
+        makeMockBackend({
+          subscribe: vi.fn((_project: string, h: RealtimeHandlers) => {
+            handlers = h
+            return () => {}
+          }),
+          createComment: vi.fn(async () => {
+            handlers.onCommentDelete!(saved) // delete arrives before the response
+            return saved
+          }),
+        }),
+      )
+      const store = useCommentsStore()
+      store.startRealtime()
+      await store.setPath('/pricing')
+      store.sidebarComments = []
+      store.enterPickMode()
+      store.beginCompose(anchor)
+
+      await store.saveComment('deleted meanwhile')
+
+      expect(store.items.map((c) => c.id)).toEqual([])
+      expect(store.sidebarComments.map((c) => c.id)).toEqual([])
+    })
+
+    it('does not resurrect a reply whose delete echo arrived first', async () => {
+      const created = replyRec()
+      let handlers: RealtimeHandlers = {}
+      setBackend(
+        makeMockBackend({
+          listReplies: vi.fn().mockResolvedValue([replyRec({ id: 'r1' })]),
+          subscribe: vi.fn((_project: string, h: RealtimeHandlers) => {
+            handlers = h
+            return () => {}
+          }),
+          createReply: vi.fn(async () => {
+            handlers.onReplyDelete!(created)
+            return created
+          }),
+        }),
+      )
+      const store = useCommentsStore()
+      store.startRealtime()
+      await store.loadReplies('c1')
+
+      await store.addReply('c1', 'gone already')
+
+      expect(store.replies.get('c1')!.map((r) => r.id)).toEqual(['r1'])
+    })
+
+    it('ignores a late echo of an already-deleted record', async () => {
+      let handlers: RealtimeHandlers = {}
+      setBackend(
+        makeMockBackend({
+          subscribe: vi.fn((_project: string, h: RealtimeHandlers) => {
+            handlers = h
+            return () => {}
+          }),
+        }),
+      )
+      const store = useCommentsStore()
+      store.startRealtime()
+
+      handlers.onCommentCreate!(rec({ id: 'c-gone' }))
+      handlers.onCommentDelete!(rec({ id: 'c-gone' }))
+      expect(store.items.map((c) => c.id)).toEqual([])
+
+      // The update/create of that id still in flight must not re-add it.
+      handlers.onCommentUpdate!(rec({ id: 'c-gone', body: 'zombie' }))
+      expect(store.items.map((c) => c.id)).toEqual([])
+    })
+
+    it('bounds the deleted-id set so a long session cannot grow it forever', () => {
+      setBackend(makeMockBackend())
+      const store = useCommentsStore()
+
+      for (let i = 0; i < 250; i++) store.rememberDeleted(`c-${i}`)
+
+      expect(store.deletedIds.size).toBe(200)
+      // Oldest evicted, newest kept.
+      expect(store.deletedIds.has('c-0')).toBe(false)
+      expect(store.deletedIds.has('c-249')).toBe(true)
+    })
+  })
+
   describe('getters', () => {
     it('keeps all items but splits unresolved/resolved for the current path', async () => {
       const loaded = [

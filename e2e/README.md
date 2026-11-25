@@ -41,11 +41,13 @@ Caddy/PocketBase/xcaddy versions are pinned in `scripts/tools.env`. To skip the
 build, point `CADDY_BIN` / `POCKETBASE_BIN` at prebuilt binaries —
 `scripts/tools-lib.sh` resolves them the same way for every script. Re-running
 `fetch-tools.sh` is idempotent: an existing `.tools/caddy` of the pinned version
-is left alone.
+(and `.tools/pocketbase` reporting the pinned version) is left alone.
 
-`stack.sh up` refuses to start when 18090/15173 (or 15174)/18080 are already
-listening (it will not adopt a foreign process) and stops whatever it did start
-if any step fails.
+`stack.sh up` refuses to start when 18090, 15173, 15174 or 18080 is already
+listening — both fixture ports, so a stack left behind by the other fixture is
+caught too — on 127.0.0.1 or ::1, and it will not adopt a foreign process. It
+stops whatever it did start if any step fails, and the `go` fixture is built
+before anything starts, so a build error leaves nothing running.
 
 ## This box: Playwright browsers
 

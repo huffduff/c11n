@@ -17,6 +17,12 @@ export interface Creds {
   baseUrl: string
 }
 
+/**
+ * Port of the go fixture's demo server. Keep in sync with `GO_PORT` in
+ * scripts/stack.sh (the two cannot import from each other).
+ */
+export const GO_PORT = 15174
+
 export interface PbUser {
   id: string
   email: string

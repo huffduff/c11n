@@ -34,6 +34,7 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 STATE_DIR="${C11N_STACK_DIR:-$REPO_ROOT/.stack}"
 PB_PORT=18090
 DEMO_PORT=15173
+# Keep in sync with GO_PORT in e2e/fixtures.ts (specs cannot read this file).
 GO_PORT=15174
 CADDY_PORT=18080
 FIXTURE="${C11N_FIXTURE:-vite}"
@@ -97,12 +98,13 @@ pgid_of() {
 #
 # `demo` lists both fixtures' commands on purpose: `down` runs from the e2e
 # teardown, which may or may not be handed the C11N_FIXTURE that started the
-# stack, and both are unambiguously ours.
+# stack. Each marker carries its port (and, for go, the .stack binary path), so
+# an unrelated `vite` on this box can never match.
 service_markers() {
 	case "$1" in
 	pocketbase) printf '%s\n' 'pocketbase serve' ;;
 	caddy) printf '%s\n' 'caddy run' ;;
-	demo) printf '%s\n' 'vite' "$(basename "$GO_BIN")" ;;
+	demo) printf '%s\n' "--port $DEMO_PORT" "$GO_BIN --addr 127.0.0.1:$GO_PORT" ;;
 	*) return 1 ;;
 	esac
 }
@@ -129,23 +131,35 @@ pid_is_service() {
 	return 1
 }
 
-# port_in_use <port>: succeeds when something accepts TCP on 127.0.0.1:<port>.
-# A bash /dev/tcp probe: `ss`/`lsof` are not installed everywhere, and this is
-# the check that keeps `up` from adopting a foreign listener as our service.
+# port_in_use <port>: succeeds when something accepts TCP on 127.0.0.1:<port>
+# or [::1]:<port>. A bash /dev/tcp probe: `ss`/`lsof` are not installed
+# everywhere, and this is the check that keeps `up` from adopting a foreign
+# listener as our service. The IPv6 probe is best effort: where bash or the
+# kernel does not support /dev/tcp on ::1 that probe just fails and the v4
+# check alone decides.
 port_in_use() {
-	( : </dev/tcp/127.0.0.1/"$1" ) 2>/dev/null
+	local host
+	for host in 127.0.0.1 ::1; do
+		( : </dev/tcp/"$host"/"$1" ) 2>/dev/null && return 0
+	done
+	return 1
 }
 
 # preflight_ports: refuse to start on top of anything already listening. A
 # foreign listener would otherwise answer the health checks while our own
 # process died ("port in use"), and caddy would happily proxy it.
+#
+# Both fixture ports are checked whichever fixture was selected: switching
+# C11N_FIXTURE between runs is normal, and a stack left behind by the other
+# fixture still owns its upstream port.
 preflight_ports() {
 	local port name busy=""
-	for port in "$PB_PORT" "$UPSTREAM_PORT" "$CADDY_PORT"; do
+	for port in "$PB_PORT" "$DEMO_PORT" "$GO_PORT" "$CADDY_PORT"; do
 		case "$port" in
 		"$PB_PORT") name=pocketbase ;;
-		"$CADDY_PORT") name=caddy ;;
-		*) name="upstream ($FIXTURE)" ;;
+		"$DEMO_PORT") name="demo upstream (vite fixture)" ;;
+		"$GO_PORT") name="demo upstream (go fixture)" ;;
+		*) name=caddy ;;
 		esac
 		if port_in_use "$port"; then
 			log "error: port $port ($name) is already in use by another process"
@@ -154,7 +168,7 @@ preflight_ports() {
 	done
 	if [ -n "$busy" ]; then
 		log "refusing to start: those ports belong to a process that is not this stack"
-		log "  inspect the owner with: ss -ltnp | grep -E ':($PB_PORT|$UPSTREAM_PORT|$CADDY_PORT)\\b'"
+		log "  inspect the owner with: ss -ltnp | grep -E ':($PB_PORT|$DEMO_PORT|$GO_PORT|$CADDY_PORT)\\b'"
 		log "  or stop a previous stack with: scripts/stack.sh down"
 		exit 1
 	fi
@@ -308,7 +322,7 @@ cmd_up() {
 	case "${C11N_UPSTREAM_TLS:-verify}" in
 	"" | verify) ;;
 	*)
-		die "C11N_UPSTREAM_TLS=${C11N_UPSTREAM_TLS} does not apply to the local stack: its upstream is http://127.0.0.1:$DEMO_PORT (plain http, no TLS). Unset it, or set C11N_UPSTREAM_TLS=verify."
+		die "C11N_UPSTREAM_TLS=${C11N_UPSTREAM_TLS} does not apply to the local stack: its upstream is http://127.0.0.1:$UPSTREAM_PORT (plain http, no TLS). Unset it, or set C11N_UPSTREAM_TLS=verify."
 		;;
 	esac
 
@@ -317,6 +331,14 @@ cmd_up() {
 
 	[ -f "$REPO_ROOT/packages/overlay/dist/overlay.js" ] ||
 		die "packages/overlay/dist/overlay.js is missing; run 'npm run build' at the repo root"
+
+	# Fail fast: the go fixture's build is the slowest and most failure-prone
+	# step of `up`, so it runs before anything is started (and before the EXIT
+	# trap can have a service to clean up).
+	if [ "$FIXTURE" = go ]; then
+		mkdir -p "$STATE_DIR"
+		build_go_fixture
+	fi
 
 	C11N_UP_OK=0
 	trap up_cleanup EXIT
@@ -366,7 +388,6 @@ cmd_up() {
 	wait_for pocketbase "http://127.0.0.1:$PB_PORT/api/health"
 
 	if [ "$FIXTURE" = go ]; then
-		build_go_fixture
 		start_service demo "$GO_BIN" \
 			--addr "127.0.0.1:$GO_PORT" \
 			--dir "$DEMO_DIR/dist"

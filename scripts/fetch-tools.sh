@@ -73,9 +73,13 @@ fi
 if [ -n "${POCKETBASE_BIN:-}" ]; then
 	[ -x "$POCKETBASE_BIN" ] || die "POCKETBASE_BIN=$POCKETBASE_BIN is not executable"
 	log "pocketbase: using POCKETBASE_BIN=$POCKETBASE_BIN (skipping download)"
+elif [ -x "$TOOLS_DIR/pocketbase" ] &&
+	"$TOOLS_DIR/pocketbase" --version 2>/dev/null | grep -qxF "pocketbase version $POCKETBASE_VERSION"; then
+	# Idempotent like the Caddy build above: a matching binary is not
+	# downloaded again.
+	log "pocketbase: $TOOLS_DIR/pocketbase is already $POCKETBASE_VERSION (skipping download)"
 else
 	[ "$(uname -s)" = "Linux" ] || die "prebuilt PocketBase download is Linux-only (set POCKETBASE_BIN)"
-	[ -z "$HOST_UNSUPPORTED" ] || die "$HOST_UNSUPPORTED"
 
 	zip_name="pocketbase_${POCKETBASE_VERSION}_linux_amd64.zip"
 	zip_url="https://github.com/pocketbase/pocketbase/releases/download/v${POCKETBASE_VERSION}/${zip_name}"

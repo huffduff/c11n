@@ -1,4 +1,5 @@
 import { expect, test } from '@playwright/test'
+import { GO_PORT } from '../fixtures'
 
 /**
  * Topology specs: the same proxy, two different upstreams.
@@ -12,7 +13,7 @@ import { expect, test } from '@playwright/test'
  */
 const fixture = process.env.C11N_FIXTURE ?? 'vite'
 const overlayTag = '/__c11n/overlay.js'
-const goUpstream = 'http://127.0.0.1:15174'
+const goUpstream = `http://127.0.0.1:${GO_PORT}`
 
 test.describe('go-served production topology', () => {
   test.skip(fixture !== 'go', 'go fixture only; run npm run e2e:go')

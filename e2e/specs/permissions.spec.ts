@@ -122,7 +122,7 @@ test.describe('S2 — immutable fields on comments', () => {
     const alice = await createUser(undefined, 'Alice')
     const comment = await seedComment({ author: alice.id, body: 'needs repair' })
     const creds = readCreds()
-    const repaired = comment.seq + 1000
+    const repaired = (comment.seq ?? 0) + 1000
 
     const res = await request.patch(`${creds.pbUrl}/api/collections/comments/records/${comment.id}`, {
       headers: { authorization: await superuserTokenFor() },
@@ -140,7 +140,7 @@ test.describe('S2 — immutable fields on comments', () => {
     const res = await patch(
       request,
       `${PB}/api/collections/comments/records/${comment.id}`,
-      { seq: comment.seq + 1 },
+      { seq: (comment.seq ?? 0) + 1 },
       aliceToken,
     )
     expect(res.status(), await res.text()).toBe(400)

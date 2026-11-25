@@ -31,6 +31,7 @@ a separate service.
   CHANGELOG: 0.27.x is the client for the 0.39 server API (`pb.sql.run`
   arrived in 0.27.0 for "the upcoming PocketBase v0.39.0"), and 0.28.0
   already targets 0.40. A server bump moves the SDK in the same PR, never
-  separately; `e2e/specs/supply-chain.spec.ts` fails if they drift.
+  separately; `scripts/check-pins.mjs` (CI: `npm run check:pins`) fails if
+  they drift.
 - Backups use PocketBase's built-in backup API, sent to S3-compatible
   storage (plan Phase 5).

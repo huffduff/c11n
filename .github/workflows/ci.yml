@@ -1,8 +1,9 @@
 # c11n CI
 #
 # Three independent jobs:
-#   - overlay: typecheck, build, and test the Vue overlay bundle; uploads
-#     the built overlay.js as an artifact. Also lints the workflows.
+#   - overlay: typecheck, build, and test the Vue overlay bundle; checks the
+#     S4 supply-chain pins (scripts/check-pins.mjs); uploads the built
+#     overlay.js as an artifact. Also lints the workflows.
 #   - e2e:     the real verification. Runs the whole Playwright suite against
 #     the full stack (PocketBase + Caddy + a demo upstream) on two
 #     fixtures: `vite` (dev server) and `go` (the production topology).
@@ -40,6 +41,12 @@ jobs:
 
       - name: Install dependencies
         run: npm ci
+
+      # S4 pins, checked without a browser or a stack: the Dockerfiles and
+      # scripts/tools.env must agree, and the pocketbase zip must be verified
+      # by checksum. (scripts/check-pins.mjs; no deps, milliseconds.)
+      - name: Check supply-chain pins
+        run: npm run check:pins
 
       # Lints every workflow in .github/. The config in
       # .github/actionlint.yaml declares the Blacksmith runner label (and is

@@ -1,4 +1,4 @@
-import { expect, test } from '@playwright/test'
+import { expect, test, type APIRequestContext } from '@playwright/test'
 import { createUser, readCreds, superuserTokenFor, userToken } from '../fixtures'
 
 /**
@@ -13,8 +13,24 @@ import { createUser, readCreds, superuserTokenFor, userToken } from '../fixtures
  */
 const PASSWORD = 'password123456'
 
+/**
+ * Total users in the collection, read as superuser. A rejected signup must not
+ * create a row, and the status alone does not prove that (a 403 with a
+ * half-written record, or a 200 for a filtered-out create, would both pass a
+ * status-only assertion).
+ */
+async function userCount(request: APIRequestContext): Promise<number> {
+  const creds = readCreds()
+  const res = await request.get(`${creds.pbUrl}/api/collections/users/records?perPage=1`, {
+    headers: { authorization: await superuserTokenFor() },
+  })
+  expect(res.ok(), await res.text()).toBeTruthy()
+  return ((await res.json()) as { totalItems: number }).totalItems
+}
+
 test.describe('S1 — public signup is closed', () => {
   test('anonymous signup through the proxy is rejected', async ({ request }) => {
+    const before = await userCount(request)
     const res = await request.post('/__c11n/pb/api/collections/users/records', {
       data: {
         email: `anon-${Date.now()}@c11n.test`,
@@ -22,13 +38,16 @@ test.describe('S1 — public signup is closed', () => {
         passwordConfirm: PASSWORD,
       },
     })
-    // 400 (rule denies) or 403 (rule not satisfied) — never 200.
-    expect([400, 403]).toContain(res.status())
+    // `createRule: null` is superuser-only, and PocketBase answers 403 for it
+    // (not 400: the request is well formed, the caller is not allowed).
+    expect(res.status(), await res.text()).toBe(403)
+    expect(await userCount(request)).toBe(before)
   })
 
   test('an authenticated normal user cannot create users', async ({ request }) => {
     const user = await createUser(undefined, 'Signup Probe')
     const token = await userToken(user.email)
+    const before = await userCount(request)
 
     const res = await request.post('/__c11n/pb/api/collections/users/records', {
       headers: { authorization: token },
@@ -38,7 +57,9 @@ test.describe('S1 — public signup is closed', () => {
         passwordConfirm: PASSWORD,
       },
     })
-    expect([400, 403]).toContain(res.status())
+    // Being signed in does not satisfy a superuser-only rule.
+    expect(res.status(), await res.text()).toBe(403)
+    expect(await userCount(request)).toBe(before)
   })
 
   test('the superuser can still create users', async ({ request }) => {

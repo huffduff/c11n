@@ -4,7 +4,7 @@
 # KEEP THE DEFAULTS IN SYNC WITH scripts/tools.env: the e2e suite proves the
 # native binary fetched from CADDY_VERSION + REPLACE_RESPONSE_REF, so a drift
 # here means CI green-lights a different Caddy than the one we deploy
-# (e2e/specs/supply-chain.spec.ts fails on drift).
+# (scripts/check-pins.mjs fails on drift).
 #
 # Two spellings of the same version on purpose: xcaddy wants the v-prefixed Go
 # module version, Docker tags are published without it.

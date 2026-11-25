@@ -86,7 +86,7 @@ test('a reply in project Y does not reach a project-X subscriber', async () => {
     expect(received[0].body).toBe('hello project X')
   } finally {
     await pb.collection('replies').unsubscribe('*')
-    pb.realtime.disconnect()
+    await pb.realtime.unsubscribe()
     await deleteProject(projectY)
   }
 })

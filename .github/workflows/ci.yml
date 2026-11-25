@@ -1,12 +1,14 @@
 # c11n CI
 #
-# Two independent jobs:
+# Three independent jobs:
 #   - overlay: typecheck, build, and test the Vue overlay bundle; uploads
 #     the built overlay.js as an artifact.
+#   - e2e:     the real verification. Runs the whole Playwright suite against
+#     the full stack (PocketBase + Caddy + a demo upstream) on two
+#     fixtures: `vite` (dev server) and `go` (the production topology).
 #   - docker:  smoke-builds both deploy images (deploy/caddy, deploy/pocketbase).
-#     This is the first place these Dockerfiles are actually built — the dev
-#     environment has no Docker daemon, and both prior reviews flagged them as
-#     untested. A green docker job here is the real verification.
+#     It only proves the Dockerfiles build — no container is run, so treat a
+#     green docker job as "the images compile", not "the deployment works".
 
 name: ci
 
@@ -32,9 +34,10 @@ jobs:
       - name: Typecheck overlay
         run: npm run typecheck -w packages/overlay
 
-      # Build BEFORE test on purpose: test/mount-dist.spec auto-skips when
-      # packages/overlay/dist is absent. Building first means the dist smoke
-      # test runs against the freshly built bundle instead of silently skipping.
+      # Build BEFORE test on purpose: test/mount-dist.spec skips when
+      # packages/overlay/dist is absent locally but FAILS when it is absent
+      # under CI. Building first means the dist smoke test runs against the
+      # freshly built bundle.
       - name: Build overlay bundle
         run: npm run build -w packages/overlay
 
@@ -47,6 +50,74 @@ jobs:
           name: overlay.js
           path: packages/overlay/dist/overlay.js
           if-no-files-found: error
+
+  # The real verification: the whole suite against the whole stack, once per
+  # topology. The actions are pinned to the same runner label as the other
+  # jobs; no Docker daemon is involved (scripts/fetch-tools.sh builds Caddy
+  # with xcaddy and downloads PocketBase).
+  e2e:
+    name: e2e (${{ matrix.fixture }})
+    runs-on: blacksmith-2vcpu-ubuntu-2404
+    strategy:
+      # One fixture failing must not cancel the other: the point of the matrix
+      # is to see which topology broke.
+      fail-fast: false
+      matrix:
+        fixture: [vite, go]
+    env:
+      # globalSetup/globalTeardown read this to start and tear down the stack
+      # for the right upstream (vite dev server vs. the Go production build).
+      C11N_FIXTURE: ${{ matrix.fixture }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .tool-versions
+          cache: npm
+
+      # xcaddy (for the Caddy build) and the go fixture's server both need go.
+      # Cache disabled on purpose: examples/demo-go-server is stdlib-only, so
+      # there is no go.sum for setup-go to key a module cache on.
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: .tool-versions
+          cache: false
+
+      # The pinned binaries (.tools/caddy, .tools/pocketbase) are expensive to
+      # build/download and depend only on scripts/tools.env.
+      - uses: actions/cache@v4
+        with:
+          path: .tools
+          key: tools-${{ runner.os }}-${{ hashFiles('scripts/tools.env') }}
+
+      - name: Fetch pinned native tools
+        run: scripts/fetch-tools.sh
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Install Chromium
+        run: npx -w e2e playwright install --with-deps chromium
+
+      - name: Build overlay bundle
+        run: npm run build
+
+      # C11N_FIXTURE comes from the job env; stack.sh builds the SPA and the Go
+      # server itself for the go fixture.
+      - name: Run e2e suite
+        run: npm test -w e2e
+
+      - name: Upload Playwright artifacts
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-${{ matrix.fixture }}
+          path: |
+            e2e/playwright-report
+            e2e/test-results
+            .stack/*.log
+          if-no-files-found: ignore
 
   docker:
     runs-on: blacksmith-2vcpu-ubuntu-2404

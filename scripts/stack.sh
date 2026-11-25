@@ -415,6 +415,7 @@ cmd_up() {
 		export C11N_LISTEN=":$CADDY_PORT"
 		export C11N_PB_ADDR="127.0.0.1:$PB_PORT"
 		export C11N_OVERLAY_DIR="$REPO_ROOT/packages/overlay/dist"
+		export C11N_SIGNIN_DIR="$REPO_ROOT/packages/signin"
 		export C11N_UPSTREAM="http://127.0.0.1:$UPSTREAM_PORT"
 		# Always "verify": the upstream is plain http (see the guard in up), and
 		# an empty value would make Caddy read it as set.

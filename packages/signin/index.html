@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="robots" content="noindex" />
+    <title>c11n — sign in</title>
+    <link rel="stylesheet" href="/__c11n/auth/signin.css" />
+  </head>
+  <body>
+    <main class="card">
+      <p class="logo">c11n</p>
+      <h1 id="signin-title">Sign in</h1>
+      <!--
+        Three states, chosen by ?reason= (ADR 0006, task 3.7). The copy is
+        fixed here rather than fetched: this page must render with no session
+        and no API call, which is exactly the state a signed-out user is in.
+        `next` is kept in the URL by the proxy (task 3.5) but is not used in
+        the MVP: there is no email form, so there is nothing to submit.
+      -->
+      <p class="message" id="signin-message">
+        Your session has expired or you're not signed in. Ask your project
+        contact for a new sign-in link.
+      </p>
+      <p class="hint">
+        Invitations are sent by the team running this review. There is no
+        password to enter and no sign-up form.
+      </p>
+    </main>
+    <script>
+      ;(function () {
+        var params = new URLSearchParams(window.location.search)
+        var reason = params.get('reason') || 'expired'
+        var messages = {
+          expired:
+            "Your session has expired or you're not signed in. Ask your project contact for a new sign-in link.",
+          'signed-out': "You've been signed out.",
+          invalid:
+            'That link has expired or was already used. Ask your project contact for a new one.',
+        }
+        if (!messages[reason]) reason = 'expired'
+        document.getElementById('signin-title').textContent =
+          reason === 'signed-out' ? 'Signed out' : 'Sign in'
+        document.getElementById('signin-message').textContent = messages[reason]
+        document.body.setAttribute('data-reason', reason)
+      })()
+    </script>
+  </body>
+</html>

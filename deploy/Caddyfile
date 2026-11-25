@@ -28,6 +28,28 @@
 }
 
 {$C11N_LISTEN::8080} {
+	# ---- public identity surface (ADR 0006) --------------------------------
+	# The only routes with no session gate in front of them (3.8): the sign-in
+	# page, and the two routes that create or clear the session cookie. Caddy
+	# rewrites the two auth routes onto the PocketBase hook routes of the same
+	# name; the query string (t=, next=) is preserved by `rewrite`.
+	handle /__c11n/auth/magic {
+		rewrite * /api/c11n/auth/magic
+		reverse_proxy {$C11N_PB_ADDR:pocketbase:8090}
+	}
+
+	handle /__c11n/auth/logout {
+		rewrite * /api/c11n/auth/logout
+		reverse_proxy {$C11N_PB_ADDR:pocketbase:8090}
+	}
+
+	# Static sign-in page. handle_path strips the prefix, so /__c11n/auth/
+	# serves index.html out of C11N_SIGNIN_DIR.
+	handle_path /__c11n/auth/* {
+		root * {$C11N_SIGNIN_DIR:/srv/signin}
+		file_server
+	}
+
 	# PocketBase API + realtime, same-origin under /__c11n/pb/
 	handle_path /__c11n/pb/* {
 		reverse_proxy {$C11N_PB_ADDR:pocketbase:8090} {

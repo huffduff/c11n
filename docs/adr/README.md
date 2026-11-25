@@ -14,10 +14,10 @@ Each ADR records one decision: its context, the choice, and its consequences.
 | [0002](0002-proxy-injection-delivery.md) | Deliver the overlay by reverse-proxy injection. The proxy is also the security boundary | Accepted 2026-08-19, re-affirmed 2026-11-25 |
 | [0003](0003-pocketbase-backend.md) | PocketBase is the v1 backend, behind the `C11nBackend` interface | Accepted 2026-08-19 |
 | [0004](0004-shadow-dom-vue-overlay.md) | Vue 3 overlay, single IIFE bundle, mounted in a shadow DOM | Accepted 2026-08-19 |
-| [0005](0005-one-deployment-per-site.md) | One k8s deployment per reviewed site. Compose is for dev only | Accepted 2026-11-25 (packaging detail Proposed) |
-| [0006](0006-passwordless-identity-at-the-proxy.md) | Passwordless invite / magic-link identity, httpOnly session cookie, proxy-enforced gate | **Proposed** |
-| [0007](0007-stack-e2e-is-definition-of-done.md) | A scripted full-stack e2e test is the definition of done | **Proposed** |
-| [0008](0008-roles-and-permissions.md) | Roles: owner / team / client (/ agent) | **Proposed** |
+| [0005](0005-one-deployment-per-site.md) | One k8s deployment per reviewed site, one container per service, everything configurable. Compose is for dev only | Accepted 2026-11-25 |
+| [0006](0006-passwordless-identity-at-the-proxy.md) | Passwordless invite / magic-link identity, httpOnly session cookie, proxy-enforced gate. MVP invites are copy-the-link | Accepted 2026-11-25 |
+| [0007](0007-stack-e2e-is-definition-of-done.md) | A scripted full-stack e2e test is the definition of done | Accepted 2026-11-25 |
+| [0008](0008-roles-and-permissions.md) | Roles: owner / team / client / agent. The agent triages and turns comments into tickets | Accepted 2026-11-25 |
 
 ## Housekeeping decisions (2026-11-25, Tom: "be aggressive with cleanup")
 

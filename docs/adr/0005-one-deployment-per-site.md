@@ -1,7 +1,10 @@
 # ADR 0005: One k8s deployment per reviewed site; compose for dev only
 
-**Status:** Accepted 2026-11-25 (Tom). The packaging detail below is
-**Proposed**.
+**Status:** Accepted 2026-11-25 (Tom). Tom added three points:
+
+- "K8s for final destination, so 1 container per service is fine."
+- Cluster, ingress and domain: "All of this should be configurable."
+- "One docker (k8s) hosted per site is fine. Compose just for dev work."
 
 ## Decision (accepted)
 
@@ -10,10 +13,26 @@
 - `deploy/docker-compose.yml` stays as the **dev** environment only. It is
   not a supported production path.
 
-## Packaging (proposed, needs confirmation)
+## Packaging (accepted)
+
+- **Everything about the target environment is a Helm value, with nothing
+  hardcoded.** That covers:
+  - the hostname
+  - `ingressClassName` and ingress annotations
+  - TLS: a cert-manager `ClusterIssuer` name, an existing secret, or none
+    (TLS terminated upstream)
+  - the storage class and size
+  - resources, node selectors and tolerations
+  - the upstream URL and TLS mode
+  - the bootstrap owner email
+  - the optional S3 backup target
+  - the optional SMTP settings
+
+  The chart must work on k3s/Traefik and on ingress-nginx with no template
+  changes.
 
 - One Helm chart, `deploy/helm/c11n`. One release per reviewed site.
-- **One pod, two containers:** `caddy` (with `replace-response` and the
+- **One pod, two containers (one per service):** `caddy` (with `replace-response` and the
   overlay bundle baked in) and `pocketbase` (with migrations and hooks
   baked in). They share the pod network, so Caddy reaches PocketBase on
   `localhost:8090`.

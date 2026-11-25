@@ -1,6 +1,6 @@
 # ADR 0007: A scripted full-stack e2e test is the definition of done
 
-**Status:** **Proposed** 2026-11-25
+**Status:** Accepted 2026-11-25 (Tom)
 
 ## Context
 

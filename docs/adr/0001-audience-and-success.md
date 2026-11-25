@@ -19,6 +19,18 @@ though the product didn't work (see `docs/assessment/2026-11-25-state-of-the-rep
 
 ## Consequences
 
+- **Dogfood target (Tom, 2026-11-25):** a Vue 3 SPA. In production a Go
+  backend serves it; in dev it runs on the Vite dev server. The repo will
+  be shared later. What that implies:
+  - c11n has to work in front of **both** topologies:
+    - Vite dev: HMR websocket, module requests, SPA fallback in Vite.
+    - Go production: built assets, SPA fallback in Go, and the API most
+      likely on the same origin.
+  - If the Go API is on the same origin, most CORS problems go away. It
+    becomes the main thing to confirm once we have the repo.
+  - The e2e harness should therefore exercise a **Go-served build** of the
+    demo app as well as the Vite dev server (plan task 1.7).
+
 - Proxy hardening only has to cover **the dogfood site's** stack (its host,
   auth and origin quirks). It does not have to cover the web at large.
   Supporting arbitrary third-party sites is out of scope until after the

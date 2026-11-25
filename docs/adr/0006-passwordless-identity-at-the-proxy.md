@@ -1,8 +1,18 @@
 # ADR 0006: Passwordless invites and magic links, with an httpOnly session enforced at the proxy
 
-**Status:** **Proposed** 2026-11-25. Tom: "Invite/magic links are fine as
-long as user identity is secure. Open to suggestions for best UX/DX." This
-is that suggestion. It is not accepted yet.
+**Status:** Accepted 2026-11-25 (Tom). Tom's brief was: "Invite/magic links
+are fine as long as user identity is secure. Open to suggestions for best
+UX/DX." This ADR was the suggestion, and Tom accepted it.
+
+**MVP scope (Tom, 2026-11-25): copy-the-link only.**
+- `POST /api/c11n/invite` always returns the link. The inviter passes it on
+  through Slack, email or similar.
+- Re-requesting a link from the sign-in page has no email channel, so in the
+  MVP it shows "Ask your project contact for a new link." A team member can
+  generate a fresh link for an existing user.
+- Sending invite and re-request emails over SMTP is **post-MVP**. When it
+  lands, it is configured through `C11N_SMTP_*` and nothing else in this
+  design changes.
 
 ## Context
 
@@ -13,7 +23,7 @@ is that suggestion. It is not accepted yet.
 - Client users are external and occasional. Passwords are friction for
   them, and a support burden for us.
 
-## Decision (proposed)
+## Decision
 
 ### UX
 
@@ -39,20 +49,25 @@ is that suggestion. It is not accepted yet.
   or updates the user and the invite, and sends the email through
   PocketBase's SMTP settings. **If SMTP isn't configured, it returns the
   link** so the inviter can pass it on through Slack or similar.
-- `GET /__c11n/auth/magic?t=…` (routed to a hook) checks the token hash, the
+- **Public auth paths** all sit under `/__c11n/auth/`. That prefix is the
+  only one exempt from the gate:
+  - `/__c11n/auth/` is the static sign-in page.
+  - Caddy rewrites `/__c11n/auth/{magic,request,logout}` to the PocketBase
+    hook routes `/api/c11n/auth/{magic,request,logout}`.
+- `GET /__c11n/auth/magic?t=…` checks the token hash, the
   expiry (15 min, single use) and the user. It then issues a PocketBase auth
   token and sets **`c11n_session`**: `HttpOnly; Secure; SameSite=Lax;
   Path=/`, lifetime 14 days. Finally it 302s to the `next` path, which must
   be a same-origin path.
-- `POST /api/c11n/auth/request` serves the "send me a new link" form,
-  rate-limited per email and per IP.
-- `GET /api/c11n/session` is the `forward_auth` target. It returns 200 with
+- `POST /__c11n/auth/request` serves the "send me a new link" form,
+  rate-limited per email and per IP. This is post-MVP; it needs SMTP.
+- `GET /api/c11n/session` is the `forward_auth` target. Caddy calls it on
+  the pod-internal PocketBase address; it is not a public path. It returns 200 with
   `X-C11n-User` for a valid cookie. Otherwise it sends a 302 to the sign-in
   page for HTML requests and a 401 for everything else.
 - **Caddy:**
   - `forward_auth` covers **every** route (the reviewed site, `/__c11n/*`
-    and `/__c11n/pb/*`) except `/__c11n/auth/*` and the sign-in page's
-    static assets.
+    and `/__c11n/pb/*`) except `/__c11n/auth/*`.
   - For `/__c11n/pb/*` Caddy sets `header_up Authorization
     {http.request.cookie.c11n_session}`. The PocketBase SDK in the overlay
     never holds a token.

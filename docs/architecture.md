@@ -7,8 +7,8 @@ the ADR wins. Current state and known bugs:
 
 > **Pending changes:**
 > - Identity is moving from email/password to proxy-enforced magic links
->   (ADR 0006, proposed).
-> - Roles are being introduced (ADR 0008, proposed).
+>   (ADR 0006, accepted; not built yet).
+> - Roles are being introduced (ADR 0008, accepted; not built yet).
 > - Production hosting is one Helm release per site; compose is for dev
 >   only (ADR 0005).
 

@@ -109,6 +109,40 @@ test.describe('S2 — immutable fields on comments', () => {
     expect((await listComments()).find((c) => c.id === comment.id)?.body).toBe('after')
   })
 
+  // The hook is the guard, and it lets a superuser through on purpose:
+  // repairing a bad seq (or a mis-set author) is an admin job, and an admin
+  // stuck behind the same 400 would have to edit SQLite by hand. The escape
+  // hatch is superuser-only — the rule strings are unchanged, so a normal
+  // author is still rejected by the hook.
+  test('the superuser can repair seq', async ({ request }) => {
+    const alice = await createUser(undefined, 'Alice')
+    const comment = await seedComment({ author: alice.id, body: 'needs repair' })
+    const creds = readCreds()
+    const repaired = comment.seq + 1000
+
+    const res = await request.patch(`${creds.pbUrl}/api/collections/comments/records/${comment.id}`, {
+      headers: { authorization: await superuserTokenFor() },
+      data: { seq: repaired },
+    })
+    expect(res.status(), await res.text()).toBe(200)
+    expect((await listComments()).find((c) => c.id === comment.id)?.seq).toBe(repaired)
+  })
+
+  test('the superuser bypass does not weaken the author path', async ({ request }) => {
+    const alice = await createUser(undefined, 'Alice')
+    const comment = await seedComment({ author: alice.id, body: 'author cannot renumber' })
+    const aliceToken = await userToken(alice.email)
+
+    const res = await patch(
+      request,
+      `${PB}/api/collections/comments/records/${comment.id}`,
+      { seq: comment.seq + 1 },
+      aliceToken,
+    )
+    expect(res.status(), await res.text()).toBe(400)
+    expect((await listComments()).find((c) => c.id === comment.id)?.seq).toBe(comment.seq)
+  })
+
   test('a resent unchanged seq is accepted (full-record PUTs stay legal)', async ({ request }) => {
     const alice = await createUser(undefined, 'Alice')
     const comment = await seedComment({ author: alice.id, body: 'unchanged seq' })

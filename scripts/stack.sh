@@ -357,6 +357,18 @@ cmd_up() {
 		head -c 24 /dev/urandom | od -An -tx1 | tr -d ' \n')"
 	[ -n "$pw" ] || die "could not generate a superuser password"
 
+	# Phase 3 identity (ADR 0006). `pb_hooks/bootstrap.pb.js` creates the first
+	# owner when the users collection has none, and prints a single-use invite
+	# link. The link lands in $STATE_DIR/pocketbase.log, which is where
+	# e2e/fixtures.ts (bootstrapInviteLink) reads it from — proving an operator
+	# can find it the same way. Both values can be overridden from the caller's
+	# environment; they are exported here so the hook, which runs inside BOTH
+	# children below (the upsert CLI boots the app with this hooks dir, then
+	# serve), sees them. The hook is a no-op once an owner exists, so re-running
+	# `up` on an existing pb_data does not mint a second owner or link.
+	export C11N_OWNER_EMAIL="${C11N_OWNER_EMAIL-owner@c11n.test}"
+	export C11N_PUBLIC_URL="${C11N_PUBLIC_URL-http://127.0.0.1:$CADDY_PORT}"
+
 	# Bootstrap before serve: the CLI applies migrations and writes the
 	# superuser while it holds the database exclusively. Doing it against a
 	# running serve hits the same SQLite file from a second process.

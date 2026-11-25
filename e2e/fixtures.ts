@@ -45,6 +45,39 @@ export interface PbComment {
 
 const repoRoot = path.resolve(__dirname, '..')
 const credsPath = process.env.C11N_CREDS ?? path.join(repoRoot, '.stack', 'creds.json')
+const stateDir = process.env.C11N_STACK_DIR ?? path.join(repoRoot, '.stack')
+
+/** Raw text of a stack service log (`.stack/<name>.log`), '' when missing. */
+export function stackLog(name: 'pocketbase' | 'caddy' | 'demo'): string {
+  try {
+    return fs.readFileSync(path.join(stateDir, `${name}.log`), 'utf8')
+  } catch {
+    return ''
+  }
+}
+
+export interface BootstrapInvite {
+  email: string
+  ttlHours: number
+  link: string
+  token: string
+}
+
+/**
+ * The one-time owner invite that `pb_hooks/bootstrap.pb.js` prints on a fresh
+ * stack (task 3.2). Read from the log rather than from the database on
+ * purpose: the log line is the only copy of the raw token, so a spec that
+ * regexes it also proves the operator can actually find it.
+ */
+export function bootstrapInviteLink(): BootstrapInvite {
+  const match = stackLog('pocketbase').match(
+    /c11n bootstrap: owner invite for (\S+) \(single use, expires in (\d+)h\): (\S+)/,
+  )
+  if (!match) throw new Error('no bootstrap invite line in .stack/pocketbase.log')
+  const [, email, ttlHours, link] = match
+  const token = new URL(link).searchParams.get('t') ?? ''
+  return { email, ttlHours: Number(ttlHours), link, token }
+}
 
 export function readCreds(): Creds {
   return JSON.parse(fs.readFileSync(credsPath, 'utf8')) as Creds

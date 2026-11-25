@@ -51,8 +51,16 @@
 	# ---- public identity surface (ADR 0006) --------------------------------
 	# The only routes with no session gate in front of them (3.8): the sign-in
 	# page, and the two routes that create or clear the session cookie. Caddy
-	# rewrites the two auth routes onto the PocketBase hook routes of the same
-	# name; the query string (t=, next=) is preserved by `rewrite`.
+	# rewrites those routes onto the PocketBase hook routes of the same name.
+	#
+	# claim is a POST with a JSON body: the token never travels in a URL, so the
+	# request log (and any unfurler) never sees it. magic is the legacy GET path
+	# and is deliberately inert — it only redirects to the sign-in page.
+	handle /__c11n/auth/claim {
+		rewrite * /api/c11n/auth/claim
+		reverse_proxy {$C11N_PB_ADDR:pocketbase:8090}
+	}
+
 	handle /__c11n/auth/magic {
 		rewrite * /api/c11n/auth/magic
 		reverse_proxy {$C11N_PB_ADDR:pocketbase:8090}

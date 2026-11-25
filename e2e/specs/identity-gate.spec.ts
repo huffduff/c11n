@@ -190,7 +190,8 @@ test.describe('3.9 overlay identity and invites', () => {
     const linkInput = invite.locator('.c11n-invite-link')
     await expect(linkInput).toBeVisible()
     const link = await linkInput.inputValue()
-    expect(link).toContain('/__c11n/auth/magic?t=')
+    // Fragment, not query: no server (and no request log) ever sees the token.
+    expect(link).toContain('/__c11n/auth/#t=')
 
     // The Copy button is part of the MVP UX; in headless the clipboard may be
     // unavailable, so the assertion is that the click is handled and the label
@@ -204,6 +205,9 @@ test.describe('3.9 overlay identity and invites', () => {
       const invitee = await ctx.newPage()
       const res = await invitee.goto(link)
       expect(res?.status()).toBe(200)
+      // The page does not sign in on GET: the reviewer clicks Continue, and the
+      // page POSTs the claim (unfurlers cannot burn the link).
+      await invitee.locator('#signin-continue').click()
       await expect(invitee.locator('.c11n-toolbar')).toContainText(email.split('@')[0])
       // Signed in as the client, not as the inviter.
       const who = await invitee.evaluate(async () => {

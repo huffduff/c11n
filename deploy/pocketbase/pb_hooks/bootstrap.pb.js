@@ -86,12 +86,16 @@ routerUse((e) => {
           invite.set("expiresAt", new Date(expiresAt).toISOString())
           e.app.save(invite)
 
-          const link = (publicUrl || "") + "/__c11n/auth/magic?t=" + token
-          // console.log for `docker logs`/journald readers, the app logger so
-          // the line is also in PocketBase's log buffer. Both are intentional:
-          // the sinks differ, and this line is the only copy of the token.
+          const link = (publicUrl || "") + "/__c11n/auth/#t=" + token
+          // STDOUT ONLY. `e.app.logger()` persists to PocketBase's `_logs`
+          // table, so logging the link there would put a working single-use
+          // token in a queryable database table (I3). console.log writes to the
+          // process's stdout — `kubectl logs`, `docker logs`, the local
+          // `.stack/pocketbase.log` — which is where an operator reads it and
+          // what e2e/fixtures.ts parses. The logger line keeps the audit trail
+          // (which invite was minted) without the secret.
           console.log("c11n bootstrap: owner invite for " + email + " (single use, expires in " + ttlHours + "h): " + link)
-          e.app.logger().info("c11n bootstrap: owner invite", "email", email, "link", link)
+          e.app.logger().info("c11n bootstrap: owner invite minted", "email", email, "invite", invite.id)
         }
       }
     }

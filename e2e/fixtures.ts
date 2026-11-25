@@ -79,7 +79,8 @@ export function bootstrapInviteLink(): BootstrapInvite {
   )
   if (!match) throw new Error('no bootstrap invite line in .stack/pocketbase.log')
   const [, email, ttlHours, link] = match
-  const token = new URL(link).searchParams.get('t') ?? ''
+  // Links carry the token in the FRAGMENT (ADR 0006, revised): '#t=<token>'.
+  const token = link.includes('#t=') ? link.split('#t=')[1] : (new URL(link).searchParams.get('t') ?? '')
   return { email, ttlHours: Number(ttlHours), link, token }
 }
 
@@ -369,10 +370,10 @@ export async function deleteProject(id: string): Promise<void> {
   })
 }
 
-/** Turn a public magic link into the hook URL on PocketBase's own port. */
-export function directMagicUrl(link: string): string {
-  const token = new URL(link).searchParams.get('t') ?? ''
-  return `${readCreds().pbUrl}/api/c11n/auth/magic?t=${token}`
+/** The token inside a fragment link (`.../__c11n/auth/#t=<token>`). */
+export function linkToken(link: string): string {
+  const hash = new URL(link).hash.replace(/^#/, '')
+  return new URLSearchParams(hash).get('t') ?? ''
 }
 
 /** Mint a fresh (single-use) magic link for an existing or new user. */
@@ -385,17 +386,17 @@ export async function magicLinkFor(email: string, role: Role = 'client'): Promis
 }
 
 /**
- * A `c11n_session=…` Cookie header: the state a browser is in after opening a
+ * A `c11n_session=…` Cookie header: the state a browser is in after claiming a
  * magic link. API-level specs pass it to the proxy instead of a bearer, because
  * since 3.8 the proxy derives Authorization from this cookie and overwrites
  * anything the client sent.
  */
 export async function sessionCookie(email: string, role: Role = 'client'): Promise<string> {
-  const opened = await openMagicLink(await ctx(), directMagicUrl(await magicLinkFor(email, role)))
-  if (opened.status !== 302 || !opened.setCookie) {
-    throw new Error(`sessionCookie(${email}) -> ${opened.status} ${opened.body}`)
+  const claimed = await claimInvite(await ctx(), await magicLinkFor(email, role))
+  if (claimed.status !== 200 || !claimed.setCookie) {
+    throw new Error(`sessionCookie(${email}) -> ${claimed.status} ${claimed.body}`)
   }
-  return `c11n_session=${sessionToken(opened.setCookie)}`
+  return `c11n_session=${sessionToken(claimed.setCookie)}`
 }
 
 export interface SignedIn {
@@ -404,9 +405,9 @@ export interface SignedIn {
 }
 
 /**
- * Sign a browser in the way a reviewer does: mint a magic link as superuser and
- * open it through the proxy. The link is public, sets the cookie and 302s to
- * `/`.
+ * Sign a browser in the way a reviewer does since the fragment change: open the
+ * link (the token stays in the fragment, so no server sees it), click
+ * "Continue to review", and let the page POST the claim.
  *
  * `email` omitted creates a fresh user with `role`. The wait is the authed
  * toolbar: the overlay only renders it once `/api/c11n/me` answered from the
@@ -417,9 +418,76 @@ export async function signInAs(page: Page, email?: string, role: Role = 'client'
     ? ((await userByEmail(email)) ?? (await createUser(email, `${role} user`, role)))
     : await createUser(undefined, `${role} user`, role)
   const link = await magicLinkFor(user.email, (user.role as Role) ?? role)
-  await page.goto(link)
-  await page.locator('.c11n-toolbar .c11n-mode-toggle').waitFor({ state: 'visible' })
+  await openMagicLinkInPage(page, link)
   return { user, link }
+}
+
+/**
+ * Open a magic link in a browser and click through to the session. This is the
+ * one place that knows the page's continue button; every spec that navigates a
+ * browser to an invite link should come through here.
+ *
+ * `next` is added to the PAGE's query string (the token is in the fragment), so
+ * the claim POST carries it and the page then navigates there.
+ */
+export async function openMagicLinkInPage(page: Page, link: string, next?: string): Promise<void> {
+  const url = next === undefined ? link : withNextParam(link, next)
+  await page.goto(url)
+  const continueButton = page.locator('#signin-continue')
+  await continueButton.waitFor({ state: 'visible' })
+  await continueButton.click()
+  // Wait for the claim's navigation to land AND finish loading: returning while
+  // the document is still committing makes the next page.goto in a spec fight
+  // with it ("navigation is interrupted by another navigation").
+  await page.waitForURL((current) => !current.pathname.startsWith('/__c11n/auth/'))
+  await page.waitForLoadState('load')
+}
+
+/** Put `next` before the fragment: `/auth/?next=…#t=…`. */
+export function withNextParam(link: string, next: string): string {
+  const hashAt = link.indexOf('#')
+  const base = hashAt === -1 ? link : link.slice(0, hashAt)
+  const hash = hashAt === -1 ? '' : link.slice(hashAt)
+  return `${base}?next=${encodeURIComponent(next)}${hash}`
+}
+
+export interface ClaimResult {
+  status: number
+  /** The raw Set-Cookie header, when the claim minted a session. */
+  setCookie?: string
+  /** `{ redirect }` on success, `{ message }` on a refused claim. */
+  json?: { redirect?: string; message?: string }
+  body: string
+}
+
+/**
+ * POST a magic link's token to the claim route, through the proxy (the public
+ * path a browser uses), without a browser. `origin` is the CSRF-relevant
+ * header: it defaults to the public origin, and a spec passes something else to
+ * prove a cross-origin claim is refused.
+ */
+export async function claimInvite(
+  request: APIRequestContext,
+  link: string,
+  options: { next?: string; origin?: string; contentType?: string } = {},
+): Promise<ClaimResult> {
+  const creds = readCreds()
+  const token = linkToken(link)
+  const res = await request.post(`${creds.baseUrl}/__c11n/auth/claim`, {
+    headers: {
+      'content-type': options.contentType ?? 'application/json',
+      origin: options.origin ?? creds.baseUrl,
+    },
+    data: { t: token, ...(options.next === undefined ? {} : { next: options.next }) },
+  })
+  const body = await res.text()
+  let parsed: ClaimResult['json']
+  try {
+    parsed = body ? (JSON.parse(body) as ClaimResult['json']) : undefined
+  } catch {
+    // error pages are HTML
+  }
+  return { status: res.status(), setCookie: res.headers()['set-cookie'], json: parsed, body }
 }
 
 export interface MagicOpen {
@@ -433,8 +501,8 @@ export interface MagicOpen {
 }
 
 /**
- * GET a magic link WITHOUT following the redirect: the interesting parts of
- * the response are the status, the Location and the Set-Cookie header.
+ * GET a magic link WITHOUT following the redirect, for the legacy-path specs.
+ * A GET must never claim: this is what an unfurler does.
  */
 export async function openMagicLink(request: APIRequestContext, link: string): Promise<MagicOpen> {
   const res = await request.get(link, { maxRedirects: 0 })

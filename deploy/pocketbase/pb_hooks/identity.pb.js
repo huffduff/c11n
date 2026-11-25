@@ -212,9 +212,13 @@ routerAdd("POST", "/api/c11n/invite", (e) => {
 
   // C11N_PUBLIC_URL is what a human copies into Slack; without it, fall back to
   // the origin this request came in on, which is right behind Caddy.
+  //
+  // The token is in the FRAGMENT, not the query: a fragment is never sent to a
+  // server, so neither PocketBase's request log nor the next page's Referer can
+  // see it. The sign-in page reads `location.hash` and POSTs the claim.
   const publicUrl = ($os.getenv("C11N_PUBLIC_URL") || "").replace(/\/+$/, "")
   const origin = (e.isTLS() ? "https://" : "http://") + e.request.header.get("Host")
-  const link = (publicUrl || origin) + "/__c11n/auth/magic?t=" + token
+  const link = (publicUrl || origin) + "/__c11n/auth/#t=" + token
 
   return e.json(200, {
     link: link,
@@ -224,15 +228,26 @@ routerAdd("POST", "/api/c11n/invite", (e) => {
   })
 })
 
-// ---- 3.4: GET /api/c11n/auth/magic — the callback --------------------------
-// Public (no auth): the token in the URL is the credential. Caddy rewrites
-// /__c11n/auth/magic here (3.8); the route is also reachable under the
-// /__c11n/pb prefix for pod-internal callers.
+// ---- 3.4: POST /api/c11n/auth/claim — the single-use claim -----------------
+// Public (no auth): the token in the body is the credential. Caddy rewrites
+// /__c11n/auth/claim here; the route is also reachable under the /__c11n/pb
+// prefix for pod-internal callers.
+//
+// WHY A POST AND NOT THE GET LINK (I3/4, revised 2026-11-25):
+//   - Links are minted as .../__c11n/auth/#t=<token>. A fragment is never sent
+//     to any server, so PocketBase's request logger (which stores full URLs for
+//     every request) and the Referer header of the page that follows never see
+//     the token.
+//   - GET is not a safe verb for a single-use action. Slackbot, Outlook Safe
+//     Links and every link unfurler GET a pasted link before a human clicks it;
+//     when GET was the claim, the unfurler burned the invite. The GET path now
+//     only serves the static sign-in page, which asks for a click and then
+//     POSTs.
 //
 // Single use is enforced by ONE conditional UPDATE, not by read-then-save:
 // `usedAt` is only written when it is still empty, and the affected-row count
 // says whether this call won. SQLite serialises writers, so with N parallel
-// uses exactly one gets 1 and the rest get 0 — a transaction around
+// claims exactly one gets 1 and the rest get 0 — a transaction around
 // read+save would instead let several readers see the row unused and then
 // collide on the write (SQLITE_BUSY, which surfaces as a 500, not a 410).
 //
@@ -243,23 +258,21 @@ routerAdd("POST", "/api/c11n/invite", (e) => {
 // The link is marked used BEFORE the session is minted. If minting then fails
 // the link is spent — the safer failure: a retry costs the user one more link,
 // while the reverse order would leave a window where a token works twice.
-routerAdd("GET", "/api/c11n/auth/magic", (e) => {
-  // Every failure is the same answer for the user: the static sign-in page
-  // (3.7) with reason=invalid. The URL is the contract; X-C11n-Error keeps the
-  // class machine-readable for scripts and specs, which is all the old inline
-  // page's status codes (404 unknown / 410 spent) ever bought.
-  //
-  // A redirect rather than an error page on purpose: the sign-in page is the
-  // one screen that tells the user what to do next ("ask your project contact
-  // for a new link"), and it must not be duplicated in a hook.
-  const page = () => {
-    e.response.header().set("X-C11n-Error", "invalid")
-    return e.redirect(302, "/__c11n/auth/?reason=invalid")
-  }
+routerAdd("POST", "/api/c11n/auth/claim", (e) => {
+  // Every failure is the same answer: 410 with a message, no cookie. The page
+  // turns that into the sign-in screen with reason=invalid; the class is in
+  // the status, so a script can tell a spent link from a malformed request.
+  const fail = (message) => e.json(410, { message: message })
 
-  const rawToken = (e.request.url.query().get("t") || "").trim()
+  let body = {}
+  try {
+    body = e.requestInfo().body || {}
+  } catch (err) {
+    body = {}
+  }
+  const rawToken = String((body && body["t"]) || "").trim()
   if (!rawToken) {
-    return page()
+    return fail("missing token")
   }
 
   let invite = null
@@ -267,17 +280,17 @@ routerAdd("GET", "/api/c11n/auth/magic", (e) => {
     invite = e.app.findFirstRecordByFilter("invites", "tokenHash = {:h}", { h: $security.sha256(rawToken) })
   } catch (err) {
     // "no rows in result set" — an unknown token is indistinguishable from a
-    // deleted one, and both answer the same page.
+    // deleted one, and both answer the same 410.
     invite = null
   }
   if (!invite) {
-    return page()
+    return fail("invalid or unknown link")
   }
 
   const usedAt = String(invite.get("usedAt") || "")
   const expiresAtMs = new Date(invite.get("expiresAt")).getTime()
   if (usedAt || !(expiresAtMs > Date.now())) {
-    return page()
+    return fail("link expired or already used")
   }
 
   const claimed = e.app
@@ -287,7 +300,7 @@ routerAdd("GET", "/api/c11n/auth/magic", (e) => {
     .execute()
   if (claimed.rowsAffected() !== 1) {
     // Someone else won the race between the read above and this write.
-    return page()
+    return fail("link expired or already used")
   }
 
   let user = null
@@ -297,7 +310,7 @@ routerAdd("GET", "/api/c11n/auth/magic", (e) => {
     user = null
   }
   if (!user) {
-    return page()
+    return fail("invite has no user")
   }
 
   // Session token: a real PocketBase auth token for the user, minted
@@ -327,7 +340,7 @@ routerAdd("GET", "/api/c11n/auth/magic", (e) => {
   // `next` is only ever a same-origin path (I2). The one validator lives in
   // the app store because a top-level function is not in scope here; a missing
   // or non-callable value fails closed to "/".
-  const rawNext = e.request.url.query().get("next") || ""
+  const rawNext = String((body && body["next"]) || "")
   let next = "/"
   try {
     const validate = $app.store().get("c11n_safe_next")
@@ -337,7 +350,24 @@ routerAdd("GET", "/api/c11n/auth/magic", (e) => {
   } catch (err) {
     next = "/"
   }
-  return e.redirect(302, next)
+  // The page does the navigation: a POST response cannot be a 302 the browser
+  // follows without turning the claim into a navigation it might replay.
+  return e.json(200, { redirect: next })
+})
+
+// ---- 3.4b: GET /api/c11n/auth/magic — the legacy link, kept inert ----------
+// Links minted before the fragment change were `.../magic?t=<token>`. They are
+// still pasted in Slack, so the path stays alive — but it NEVER claims: a GET
+// is exactly what an unfurler is allowed to do, and burning the invite there is
+// the bug this route used to be. It points at the sign-in page, which explains
+// that the link is out of date.
+//
+// Removing it instead would 404 through Caddy's static handler, which tells the
+// user nothing and tells a scanner that the route is gone; a 302 with a reason
+// costs one line.
+routerAdd("GET", "/api/c11n/auth/magic", (e) => {
+  e.response.header().set("X-C11n-Error", "legacy")
+  return e.redirect(302, "/__c11n/auth/?reason=legacy")
 })
 
 // ---- 3.6: session, me and logout ------------------------------------------

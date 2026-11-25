@@ -5,17 +5,24 @@ import { magicLinkFor, readCreds } from '../fixtures'
  * I2 (security review) — `next` must never leave the proxy's origin.
  *
  * The old validator only looked for `//`, a backslash and `://`. A value like
- * `/%09//evil` passed it: the hook 302s to a Location containing a literal TAB,
- * Chromium strips tabs while parsing a URL, and the browser lands on `//evil`
- * (proven in Chromium, not assumed). CR, LF and NUL behave the same way.
+ * `/%09//evil` passed it: the hook answered with a Location containing a
+ * literal TAB, Chromium strips tabs while parsing a URL, and the browser landed
+ * on `//evil` (proven in Chromium, not assumed). CR, LF and NUL behave the same
+ * way.
  *
- * These specs are the browser half on purpose: the assertion is
- * `new URL(page.url()).origin`, i.e. where a real browser ended up after
- * following the redirect, not what a string comparison thinks it should do.
+ * Since the fragment change the redirect happens after the continue button, so
+ * these specs click through exactly like a reviewer: the assertion is
+ * `new URL(page.url()).origin`, i.e. where a real browser ended up.
  */
 const ORIGIN = new URL(readCreds().baseUrl).origin
 
 const HOSTILE = ['/%09//evil', '/%0a//evil', '/%00/x', '/%09%09//evil', '/%0d//evil']
+
+/** `.../auth/?next=<raw>#t=<token>`: the raw escape has to reach the server. */
+function withRawNext(link: string, raw: string): string {
+  const hashAt = link.indexOf('#')
+  return `${link.slice(0, hashAt)}?next=${raw}${link.slice(hashAt)}`
+}
 
 test.describe('I2 next cannot leave the origin', () => {
   for (const raw of HOSTILE) {
@@ -24,16 +31,19 @@ test.describe('I2 next cannot leave the origin', () => {
       // String concat, NOT URLSearchParams: the parameter has to reach the hook
       // exactly as the attack sends it (a real `%09` escape in the query, which
       // decodes to a TAB), not double-encoded to a literal "%09".
-      await page.goto(`${link}&next=${raw}`)
+      await page.goto(withRawNext(link, raw))
+      await page.locator('#signin-continue').click()
+      await page.waitForURL((url) => !url.pathname.startsWith('/__c11n/auth/'))
       expect(new URL(page.url()).origin).toBe(ORIGIN)
     })
   }
 
-  test('a same-origin path is still honoured', async ({ page, request }) => {
+  test('a same-origin path is still honoured', async ({ page }) => {
     const link = await magicLinkFor(`i2-ok-${Date.now()}-${Math.floor(Math.random() * 1e6)}@example.test`)
-    await page.goto(`${link}&next=/some/page?x=1`)
+    await page.goto(withRawNext(link, '/some/page?x=1'))
+    await page.locator('#signin-continue').click()
+    await page.waitForURL((url) => url.pathname === '/some/page')
     expect(new URL(page.url()).origin).toBe(ORIGIN)
-    expect(new URL(page.url()).pathname).toBe('/some/page')
   })
 
   test('the sign-in redirect built from X-Forwarded-Uri drops a hostile next', async ({

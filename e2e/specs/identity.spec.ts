@@ -2,13 +2,13 @@ import { createHash } from 'node:crypto'
 import { expect, test, type APIRequestContext } from '@playwright/test'
 import {
   bootstrapInviteLink,
+  claimInvite,
   createUser,
   createUserWithRole,
-  directMagicUrl,
   inviteAs,
   invitesFor,
   isolatedRequest,
-  openMagicLink,
+  linkToken,
   parseSetCookie,
   patchInvite,
   readCreds,
@@ -21,17 +21,15 @@ import {
 
 /**
  * Phase 3 identity, backend half: the bootstrap owner (3.2), the invite route
- * (3.3), the magic-link callback (3.4) and the session/me/logout routes (3.6).
+ * (3.3), the magic-link claim (3.4) and the session/me/logout routes (3.6).
  *
- * API-level on purpose: the Caddy gate and the sign-in page land in the next
- * batch (3.8/3.9), so at this point the routes are reachable directly through
- * the proxy's existing `/__c11n/pb` handler. Every request still goes through
- * Caddy — the point is the surface a browser actually reaches, and a cookie
- * set on `Path=/` by a `/__c11n/pb/...` response applies site-wide.
+ * API-level on purpose: the claim is a POST with a JSON body, so a spec can
+ * drive it without a browser. The browser half (open the fragment link, click
+ * Continue) lives in specs/identity-gate.spec.ts and specs/phase3-exit.spec.ts.
  *
- * The magic-link URL is the one Caddy will rewrite from /__c11n/auth/magic to
- * the hook route in 3.8. Until then the hook route is reached under the
- * /__c11n/pb prefix, so specs swap the prefix on the returned link.
+ * Since the fragment change (ADR 0006, revised) links are
+ * `.../__c11n/auth/#t=<token>`: the token never reaches a server until the
+ * claim POST, and the claim is served by the public `/__c11n/auth/claim` route.
  */
 
 /** sha256 hex, the only form of a magic token that may reach the database. */
@@ -39,14 +37,7 @@ function sha256(value: string): string {
   return createHash('sha256').update(value).digest('hex')
 }
 
-const MAGIC_PREFIX = 'http://127.0.0.1:18080/__c11n/auth/magic?t='
-
-/** Add `next` to a public magic link (the link already carries `t`). */
-function withNext(link: string, next?: string): string {
-  const url = new URL(link)
-  if (next !== undefined) url.searchParams.set('next', next)
-  return url.toString()
-}
+const MAGIC_PREFIX = 'http://127.0.0.1:18080/__c11n/auth/#t='
 
 /** A unique invitee email per call (users.email is unique). */
 let inviteSeq = 0
@@ -72,7 +63,7 @@ test.describe('3.2 bootstrap owner', () => {
     const invite = bootstrapInviteLink()
     expect(invite.email).toBe('owner@c11n.test')
     expect(invite.ttlHours).toBe(72)
-    expect(invite.link).toMatch(/^http:\/\/127\.0\.0\.1:18080\/__c11n\/auth\/magic\?t=[A-Za-z0-9_-]{43}$/)
+    expect(invite.link).toMatch(/^http:\/\/127\.0\.0\.1:18080\/__c11n\/auth\/#t=[A-Za-z0-9_-]{43}$/)
   })
 
   test('the bootstrap owner exists, verified, with the owner role and no usable password', async ({
@@ -132,7 +123,7 @@ test.describe('3.3 invite route (copy-link MVP)', () => {
     const res = await inviteAs(request, owner.token, email, 'team')
     expect(res.status, res.text).toBe(200)
     expect(res.link!.startsWith(MAGIC_PREFIX)).toBe(true)
-    expect(new URL(res.link!).searchParams.get('t')).toMatch(/^[A-Za-z0-9_-]{43}$/)
+    expect(linkToken(res.link!)).toMatch(/^[A-Za-z0-9_-]{43}$/)
 
     // No email is sent in the MVP; the link is the delivery mechanism, so the
     // user has to be usable already.
@@ -143,7 +134,7 @@ test.describe('3.3 invite route (copy-link MVP)', () => {
 
     const invites = await invitesFor(email)
     expect(invites).toHaveLength(1)
-    const token = new URL(res.link!).searchParams.get('t')!
+    const token = linkToken(res.link!)
     expect(invites[0].tokenHash).toBe(sha256(token))
     expect(invites[0].role).toBe('team')
     expect(invites[0].user).toBe(user!.id)
@@ -256,15 +247,16 @@ test.describe('3.3 invite route (copy-link MVP)', () => {
   })
 })
 
-test.describe('3.4 magic-link callback', () => {
+test.describe('3.4 magic-link claim', () => {
   test('the link signs you in once and sets an HttpOnly session cookie', async ({ request }) => {
     const invite = await freshInvite(request)
 
-    const opened = await openMagicLink(request, invite.link)
-    expect(opened.status, opened.body).toBe(302)
-    expect(opened.location).toBe('/')
+    const claimed = await claimInvite(request, invite.link)
+    expect(claimed.status, claimed.body).toBe(200)
+    // The claim answers with the path to navigate to; the page does the move.
+    expect(claimed.json?.redirect).toBe('/')
 
-    const setCookie = opened.setCookie!
+    const setCookie = claimed.setCookie!
     expect(setCookie).toBeTruthy()
     const cookie = parseSetCookie(setCookie)
     expect(cookie.name).toBe('c11n_session')
@@ -296,60 +288,52 @@ test.describe('3.4 magic-link callback', () => {
     expect(ttlSeconds).toBeGreaterThan(14 * 86400 - 120)
     expect(ttlSeconds).toBeLessThan(14 * 86400 + 120)
 
-    // Spent: the row is marked, and the same link is now dead.
+    // Spent: the row is marked, and the same token is now dead.
     const rows = await invitesFor(invite.email)
     expect(rows[0].usedAt).not.toBe('')
 
-    const reused = await openMagicLink(request, invite.link)
-    // 3.7: a dead link is no longer an inline error page. It is a redirect to
-    // the static sign-in page with reason=invalid; the error class travels in
-    // a header so a script (and the spec) can still tell it apart.
-    expect(reused.status).toBe(302)
-    expect(reused.location).toBe('/__c11n/auth/?reason=invalid')
-    expect(reused.errorHeader).toBe('invalid')
+    const reused = await claimInvite(request, invite.link)
+    // 410, no cookie: the sign-in page turns this into reason=invalid.
+    expect(reused.status).toBe(410)
     expect(reused.setCookie).toBeUndefined()
+    expect(reused.body).not.toContain('@')
   })
 
-  test('five parallel uses of one link: exactly one signs in', async ({ request }) => {
+  test('five parallel claims of one link: exactly one signs in', async ({ request }) => {
     const invite = await freshInvite(request)
     const url = invite.link
 
-    const results = await Promise.all(Array.from({ length: 5 }, () => openMagicLink(request, url)))
-    expect(results.filter((r) => r.setCookie).length, 'exactly one winner').toBe(1)
-    expect(results.filter((r) => r.setCookie)[0].status).toBe(302)
-    expect(results.filter((r) => r.location === '/__c11n/auth/?reason=invalid')).toHaveLength(4)
+    const results = await Promise.all(Array.from({ length: 5 }, () => claimInvite(request, url)))
+    expect(results.filter((r) => r.status === 200).length, 'exactly one winner').toBe(1)
+    expect(results.filter((r) => r.setCookie).length).toBe(1)
+    expect(results.filter((r) => r.status === 410)).toHaveLength(4)
 
     const rows = await invitesFor(invite.email)
     expect(rows).toHaveLength(1)
     expect(rows[0].usedAt).not.toBe('')
   })
 
-  test('an expired link redirects to sign-in with reason=invalid and sets no cookie', async ({
-    request,
-  }) => {
+  test('an expired link is refused and sets no cookie', async ({ request }) => {
     const invite = await freshInvite(request)
     await patchInvite(invite.inviteId, { expiresAt: '2020-01-01 00:00:00.000Z' })
 
-    const opened = await openMagicLink(request, invite.link)
-    expect(opened.status).toBe(302)
-    expect(opened.location).toBe('/__c11n/auth/?reason=invalid')
-    expect(opened.setCookie).toBeUndefined()
+    const claimed = await claimInvite(request, invite.link)
+    expect(claimed.status).toBe(410)
+    expect(claimed.setCookie).toBeUndefined()
 
     // An expired link is not silently consumed either.
     const rows = await invitesFor(invite.email)
     expect(rows[0].usedAt).toBe('')
   })
 
-  test('an unknown token redirects to sign-in with reason=invalid and says nothing else', async ({
-    request,
-  }) => {
-    const opened = await openMagicLink(request, `${readCreds().pbUrl}/api/c11n/auth/magic?t=${'A'.repeat(43)}`)
-    expect(opened.status).toBe(302)
-    expect(opened.location).toBe('/__c11n/auth/?reason=invalid')
-    expect(opened.setCookie).toBeUndefined()
+  test('an unknown token is refused and says nothing else', async ({ request }) => {
+    const base = 'http://127.0.0.1:18080/__c11n/auth/'
+    const claimed = await claimInvite(request, `${base}#t=${'A'.repeat(43)}`)
+    expect(claimed.status).toBe(410)
+    expect(claimed.setCookie).toBeUndefined()
     // No id, no hash, no email in the body.
-    expect(opened.body).not.toContain('invites')
-    expect(opened.body).not.toContain('@')
+    expect(claimed.body).not.toContain('invites')
+    expect(claimed.body).not.toContain('@')
   })
 
   test('next is honoured only for a same-origin path', async ({ request }) => {
@@ -365,9 +349,9 @@ test.describe('3.4 magic-link callback', () => {
     ]
     for (const [next, expected] of cases) {
       const invite = await freshInvite(request)
-      const opened = await openMagicLink(request, withNext(invite.link, next))
-      expect(opened.status, `next=${next}: ${opened.body}`).toBe(302)
-      expect(opened.location, `next=${next}`).toBe(expected)
+      const claimed = await claimInvite(request, invite.link, { next })
+      expect(claimed.status, `next=${next}: ${claimed.body}`).toBe(200)
+      expect(claimed.json?.redirect, `next=${next}`).toBe(expected)
     }
   })
 })
@@ -378,11 +362,11 @@ async function sessionFor(
   role: 'owner' | 'team' | 'client' | 'agent' = 'client',
 ): Promise<{ cookie: string; token: string; user: { id: string; email: string; name: string; role?: string } }> {
   const invite = await freshInvite(request, role)
-  // Direct on PocketBase's port: these are pod-internal routes since 3.8, and
-  // the Set-Cookie is the only thing a browser would keep from this exchange.
-  const opened = await openMagicLink(request, directMagicUrl(invite.link))
-  expect(opened.status, opened.body).toBe(302)
-  const token = sessionToken(opened.setCookie!)
+  // The claim sets the cookie; the redirect it returns is ignored here (this
+  // spec only needs the session, not the navigation).
+  const claimed = await claimInvite(request, invite.link)
+  expect(claimed.status, claimed.body).toBe(200)
+  const token = sessionToken(claimed.setCookie!)
   const user = (await userByEmail(invite.email))!
   return { cookie: `c11n_session=${token}`, token, user }
 }

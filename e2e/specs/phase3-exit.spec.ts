@@ -48,6 +48,9 @@ async function openAs(browser: Browser, link: string): Promise<Session> {
   const ctx = await browser.newContext()
   const page = await ctx.newPage()
   await page.goto(link)
+  // The fragment link only renders the "Continue to review" page; the session
+  // comes from the POST the button makes.
+  await page.locator('#signin-continue').click()
   await expect(page.locator('.c11n-toolbar')).toBeVisible()
   return { ctx, page, close: () => ctx.close() }
 }
@@ -123,12 +126,13 @@ test.describe('Phase 3 exit flow', () => {
       await expect(asTeam.page.locator('.c11n-pin')).toHaveCount(0)
       expect((await listComments())[0].resolved).toBe(true)
 
-      // The old owner link is single use: a second visit is the sign-in page,
-      // not a second session.
+      // The old owner link is single use: opening it and clicking Continue
+      // lands on the sign-in page, not a second session.
       const replay = await browser.newContext()
       try {
         const page = await replay.newPage()
         await page.goto(ownerLink)
+        await page.locator('#signin-continue').click()
         await expect(page.locator('#signin-message')).toContainText('expired or was already used')
       } finally {
         await replay.close()

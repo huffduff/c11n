@@ -59,6 +59,38 @@ h1 {
   font-size: 13px;
 }
 
+.actions {
+  margin: 18px 0 0;
+}
+
+/* The one action on the page: continue a magic link. Same accent as the
+   overlay's primary button, and 44px tall so it is a comfortable tap target. */
+.button {
+  appearance: none;
+  border: 0;
+  border-radius: 8px;
+  padding: 11px 18px;
+  min-height: 44px;
+  background: #4f6df5;
+  color: #fff;
+  font: inherit;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.button:hover {
+  background: #6179f7;
+}
+
+.button:disabled {
+  opacity: 0.7;
+  cursor: default;
+}
+
+.button[hidden] {
+  display: none;
+}
+
 @media (prefers-color-scheme: light) {
   /* The overlay is dark by design; keep this page identical in both modes so
      the brand does not change with the reviewer's OS setting. */

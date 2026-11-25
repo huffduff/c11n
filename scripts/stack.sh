@@ -1,10 +1,16 @@
 #!/usr/bin/env bash
 # scripts/stack.sh up|down|status - the real c11n stack from native binaries.
 #
-# Starts the three services the e2e suite needs, without Docker:
+# Starts the background services the e2e suite needs, without Docker:
 #   pocketbase :18090  (data, migrations and hooks copied into $C11N_STACK_DIR)
-#   demo-vue   :15173  (vite dev server, the default upstream)
+#   upstream   :15173  (C11N_FIXTURE=vite, the default: demo-vue via vite dev)
+#              :15174  (C11N_FIXTURE=go: the built demo-vue served by
+#                       examples/demo-go-server, the production topology)
 #   caddy      :18080  (deploy/Caddyfile via C11N_* env overrides)
+#
+# The two fixtures exist because the dogfood app is served by Vite in dev and
+# by a Go backend in production (ADR 0001). The proxy has to be proven in front
+# of both, so the same suite runs twice, once per fixture, with a fresh stack.
 #
 # Binaries resolve through scripts/tools-lib.sh: $CADDY_BIN / $POCKETBASE_BIN
 # when set, else .tools/ (run scripts/fetch-tools.sh first).
@@ -28,11 +34,28 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 STATE_DIR="${C11N_STACK_DIR:-$REPO_ROOT/.stack}"
 PB_PORT=18090
 DEMO_PORT=15173
+GO_PORT=15174
 CADDY_PORT=18080
+FIXTURE="${C11N_FIXTURE:-vite}"
+case "$FIXTURE" in
+vite | go) ;;
+*)
+	printf "error: C11N_FIXTURE must be 'vite' or 'go' (got '%s')\n" "$FIXTURE" >&2
+	exit 1
+	;;
+esac
+# The port Caddy proxies to, and the port preflight must guard.
+if [ "$FIXTURE" = go ]; then
+	UPSTREAM_PORT="$GO_PORT"
+else
+	UPSTREAM_PORT="$DEMO_PORT"
+fi
 # The demo vite is the workspace's hoisted install: never `npx vite`, which
 # would silently download an unpinned copy when node_modules is missing.
 DEMO_DIR="$REPO_ROOT/examples/demo-vue"
 VITE_BIN="$REPO_ROOT/node_modules/.bin/vite"
+GO_SERVER_DIR="$REPO_ROOT/examples/demo-go-server"
+GO_BIN="$STATE_DIR/demo-go-server"
 ADMIN_EMAIL="e2e-admin@c11n.test"
 SERVICES="pocketbase demo caddy"
 START_TIMEOUT="${C11N_STACK_TIMEOUT:-30}"
@@ -66,15 +89,20 @@ pgid_of() {
 	ps -o pgid= -p "$1" 2>/dev/null | tr -d ' '
 }
 
-# service_marker <name>: a substring of the command line we expect for that
-# service. Killing by pidfile is only safe while the pid still runs what we
-# started: after a crash or reboot the pid may have been reused by an
-# unrelated process, and the pgid==pid check alone cannot tell the difference.
-service_marker() {
+# service_markers <name>: substrings of the command line(s) we expect for that
+# service, one per line. Killing by pidfile is only safe while the pid still
+# runs what we started: after a crash or reboot the pid may have been reused by
+# an unrelated process, and the pgid==pid check alone cannot tell the
+# difference.
+#
+# `demo` lists both fixtures' commands on purpose: `down` runs from the e2e
+# teardown, which may or may not be handed the C11N_FIXTURE that started the
+# stack, and both are unambiguously ours.
+service_markers() {
 	case "$1" in
-	pocketbase) printf 'pocketbase serve' ;;
-	caddy) printf 'caddy run' ;;
-	demo) printf 'vite' ;;
+	pocketbase) printf '%s\n' 'pocketbase serve' ;;
+	caddy) printf '%s\n' 'caddy run' ;;
+	demo) printf '%s\n' 'vite' "$(basename "$GO_BIN")" ;;
 	*) return 1 ;;
 	esac
 }
@@ -91,12 +119,13 @@ pid_is_service() {
 	is_alive "$pid" || return 1
 	pgid="$(pgid_of "$pid" || true)"
 	[ "$pgid" = "$pid" ] || return 1
-	marker="$(service_marker "$name" || true)"
-	[ -n "$marker" ] || return 0
 	args="$(cmdline_of "$pid" || true)"
-	case "$args" in
-	*"$marker"*) return 0 ;;
-	esac
+	while IFS= read -r marker; do
+		[ -n "$marker" ] || continue
+		case "$args" in
+		*"$marker"*) return 0 ;;
+		esac
+	done < <(service_markers "$name" || true)
 	return 1
 }
 
@@ -112,11 +141,11 @@ port_in_use() {
 # process died ("port in use"), and caddy would happily proxy it.
 preflight_ports() {
 	local port name busy=""
-	for port in "$PB_PORT" "$DEMO_PORT" "$CADDY_PORT"; do
+	for port in "$PB_PORT" "$UPSTREAM_PORT" "$CADDY_PORT"; do
 		case "$port" in
 		"$PB_PORT") name=pocketbase ;;
-		"$DEMO_PORT") name=demo ;;
-		*) name=caddy ;;
+		"$CADDY_PORT") name=caddy ;;
+		*) name="upstream ($FIXTURE)" ;;
 		esac
 		if port_in_use "$port"; then
 			log "error: port $port ($name) is already in use by another process"
@@ -125,7 +154,7 @@ preflight_ports() {
 	done
 	if [ -n "$busy" ]; then
 		log "refusing to start: those ports belong to a process that is not this stack"
-		log "  inspect the owner with: ss -ltnp | grep -E ':($PB_PORT|$DEMO_PORT|$CADDY_PORT)\\b'"
+		log "  inspect the owner with: ss -ltnp | grep -E ':($PB_PORT|$UPSTREAM_PORT|$CADDY_PORT)\\b'"
 		log "  or stop a previous stack with: scripts/stack.sh down"
 		exit 1
 	fi
@@ -235,6 +264,30 @@ up_cleanup() {
 	exit "$status"
 }
 
+# build_go_fixture: build the SPA bundle and the Go server binary. The binary
+# (not `go run`) is what start_service launches: with `go run` the group leader
+# would be the go tool, the real server a child of it, and the cmd marker check
+# would have nothing meaningful to match.
+build_go_fixture() {
+	local build_log
+	build_log="$(log_file demo-build)"
+	command -v go >/dev/null 2>&1 ||
+		die "go is required for C11N_FIXTURE=go (pinned in .tool-versions; run 'asdf install')"
+	: >"$build_log"
+	log "demo: building the SPA bundle (npm run build -w examples/demo-vue)"
+	if ! (cd "$REPO_ROOT" && npm run build -w examples/demo-vue) >>"$build_log" 2>&1; then
+		log "---- $build_log (tail) ----"
+		tail -n 40 "$build_log" >&2 || true
+		die "building examples/demo-vue failed"
+	fi
+	log "demo: go build -o $GO_BIN ."
+	if ! (cd "$GO_SERVER_DIR" && go build -o "$GO_BIN" .) >>"$build_log" 2>&1; then
+		log "---- $build_log (tail) ----"
+		tail -n 40 "$build_log" >&2 || true
+		die "building examples/demo-go-server failed"
+	fi
+}
+
 cmd_up() {
 	local svc pid pw pb caddy running
 	running="$(running_services | tr '\n' ' ')"
@@ -312,17 +365,24 @@ cmd_up() {
 		--hooksDir "$STATE_DIR/pb_hooks"
 	wait_for pocketbase "http://127.0.0.1:$PB_PORT/api/health"
 
-	(
-		cd "$DEMO_DIR"
-		start_service demo "$VITE_BIN" --host 127.0.0.1 --port "$DEMO_PORT" --strictPort
-	)
-	wait_for demo "http://127.0.0.1:$DEMO_PORT/"
+	if [ "$FIXTURE" = go ]; then
+		build_go_fixture
+		start_service demo "$GO_BIN" \
+			--addr "127.0.0.1:$GO_PORT" \
+			--dir "$DEMO_DIR/dist"
+	else
+		(
+			cd "$DEMO_DIR"
+			start_service demo "$VITE_BIN" --host 127.0.0.1 --port "$DEMO_PORT" --strictPort
+		)
+	fi
+	wait_for demo "http://127.0.0.1:$UPSTREAM_PORT/"
 
 	(
 		export C11N_LISTEN=":$CADDY_PORT"
 		export C11N_PB_ADDR="127.0.0.1:$PB_PORT"
 		export C11N_OVERLAY_DIR="$REPO_ROOT/packages/overlay/dist"
-		export C11N_UPSTREAM="http://127.0.0.1:$DEMO_PORT"
+		export C11N_UPSTREAM="http://127.0.0.1:$UPSTREAM_PORT"
 		# Always "verify": the upstream is plain http (see the guard in up), and
 		# an empty value would make Caddy read it as set.
 		export C11N_UPSTREAM_TLS="verify"
@@ -336,7 +396,7 @@ cmd_up() {
 
 	log "caddy:      http://127.0.0.1:$CADDY_PORT (overlay + proxied PocketBase)"
 	log "pocketbase: http://127.0.0.1:$PB_PORT (admin: /_/)"
-	log "demo:       http://127.0.0.1:$DEMO_PORT"
+	log "upstream:   http://127.0.0.1:$UPSTREAM_PORT ($FIXTURE fixture)"
 	log "credentials: $STATE_DIR/creds.json (superuser $ADMIN_EMAIL)"
 	C11N_UP_OK=1
 	trap - EXIT
@@ -345,7 +405,7 @@ cmd_up() {
 
 # stop_service <name>: terminate the recorded process group, by pidfile only.
 stop_service() {
-	local name="$1" pidfile pid pgid i marker args
+	local name="$1" pidfile pid pgid i marker args matched one
 	pidfile="$(pid_file "$name")"
 	pid="$(read_pid "$name" || true)"
 	if [ -z "$pid" ]; then
@@ -357,18 +417,20 @@ stop_service() {
 		rm -f "$pidfile"
 		return 0
 	fi
-	marker="$(service_marker "$name" || true)"
+	marker="$(service_markers "$name" | tr '\n' ' ' || true)"
 	args="$(cmdline_of "$pid" || true)"
-	if [ -n "$marker" ]; then
+	matched=""
+	while IFS= read -r one; do
+		[ -n "$one" ] || continue
 		case "$args" in
-		*"$marker"*) ;;
-		*)
-			log "warning: $name pid $pid does not look like '$marker' (cmd: ${args:-unreadable}); leaving it alone"
-			log "$name: removed stale pidfile $pidfile"
-			rm -f "$pidfile"
-			return 0
-			;;
+		*"$one"*) matched=1 ;;
 		esac
+	done < <(service_markers "$name" || true)
+	if [ -n "$marker" ] && [ -z "$matched" ]; then
+		log "warning: $name pid $pid does not look like '$marker' (cmd: ${args:-unreadable}); leaving it alone"
+		log "$name: removed stale pidfile $pidfile"
+		rm -f "$pidfile"
+		return 0
 	fi
 	pgid="$(pgid_of "$pid" || true)"
 	if [ "$pgid" != "$pid" ]; then

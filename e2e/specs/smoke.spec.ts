@@ -19,11 +19,19 @@ test.describe('proxy contract', () => {
   test('injects the overlay into HTML only', async ({ request }) => {
     const html = await request.get('/', { headers: { accept: 'text/html' } })
     expect(html.status()).toBe(200)
-    expect(await html.text()).toContain(overlayTag)
+    const body = await html.text()
+    expect(body).toContain(overlayTag)
 
-    // A JS module from Vite: the proxy must not rewrite non-HTML bodies,
-    // even when the client sends the catch-all Accept header.
-    const js = await request.get('/src/main.js', { headers: { accept: '*/*' } })
+    // A JS module the site itself loads: the proxy must not rewrite non-HTML
+    // bodies, even when the client sends the catch-all Accept header. Derived
+    // from the served HTML so the spec is topology-agnostic — /src/main.js on
+    // the vite dev server, /assets/index-<hash>.js on the Go production build.
+    const asset = [...body.matchAll(/<script[^>]+src="([^"]+)"/g)]
+      .map((m) => m[1])
+      .find((src) => !src.includes('/__c11n/'))
+    expect(asset, 'the served HTML should reference an app script').toBeTruthy()
+
+    const js = await request.get(asset!, { headers: { accept: '*/*' } })
     expect(js.status()).toBe(200)
     expect(js.headers()['content-type']).toContain('javascript')
     expect(await js.text()).not.toContain(overlayTag)

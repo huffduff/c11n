@@ -184,8 +184,11 @@ async function main() {
   })).json
   if (!comment?.id) throw new Error('could not seed the comment as superuser')
 
-  const bobAuth = await api('POST', '/api/collections/users/auth-with-password', {
-    data: { identity: bob.email, password: PASSWORD },
+  // Password auth is off on `users` (ADR 0006, task 3.9), so a user bearer is
+  // minted through the superuser impersonate endpoint.
+  const bobAuth = await api('POST', `/api/collections/users/impersonate/${bob.id}`, {
+    token: su,
+    data: { duration: 3600 },
   })
   if (bobAuth.status !== 200) throw new Error(`bob auth -> ${bobAuth.status} ${bobAuth.text}`)
   const bobToken = bobAuth.json.token

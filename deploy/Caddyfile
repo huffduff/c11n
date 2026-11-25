@@ -98,9 +98,17 @@
 			# staging-review tradeoff: strip CSP so the injected script runs
 			header_down -Content-Security-Policy
 		}
+		# A gated page must not be replayed from the browser cache after the
+		# session ends. Without this, a 200 HTML response served while signed in
+		# can satisfy the next navigation from cache and skip the gate entirely
+		# (the go fixture's FileServer sends no Cache-Control at all, so Chromium
+		# applies heuristic freshness). Matched on the request's Accept, like the
+		# injection below: a response-header matcher runs before Content-Type is
+		# known and would never fire.
+		@html header Accept *text/html*
+		header @html >Cache-Control "private, no-store"
 		# Only rewrite responses to HTML-document requests, so JS/JSON bodies
 		# containing a literal "</head>" are never mangled.
-		@html header Accept *text/html*
 		replace @html stream {
 			`</head>` `<script src="/__c11n/overlay.js" defer></script></head>`
 		}

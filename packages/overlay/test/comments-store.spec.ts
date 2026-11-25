@@ -5,6 +5,7 @@ import type { C11nBackend, CommentRec, RealtimeHandlers, ReplyRec } from '../src
 import type { Anchor } from '../src/lib/anchor'
 import { PROJECT } from '../src/lib/project'
 import { useCommentsStore } from '../src/stores/comments'
+import { useSessionStore } from '../src/stores/session'
 
 const anchor: Anchor = {
   selector: '#hero',
@@ -247,6 +248,109 @@ describe('useCommentsStore', () => {
 
       // Existing row updated in place, never appended a second time.
       expect(store.sidebarComments.map((c) => c.id)).toEqual(['c-old', 'c-new'])
+    })
+  })
+
+  // Review fix: the realtime echo is backfilled from `session.me`, while the
+  // HTTP create response carries no expanded author (`authorName: undefined`).
+  // Whichever lands second must not erase the name, or the UI falls back to
+  // the literal "author".
+  describe('author name across the echo/HTTP race', () => {
+    const me = { id: 'u1', email: 'alice@example.com', name: 'Alice' }
+    /** A record as the backend maps it without `expand: 'author'`. */
+    const noName = <T extends { authorName?: string }>(r: T): T => ({ ...r, authorName: undefined })
+
+    const replyRec = (overrides: Partial<ReplyRec> = {}): ReplyRec => ({
+      id: 'r2',
+      comment: 'c1',
+      body: 'echo me',
+      author: 'u1',
+      authorName: 'Alice',
+      created: '2026-08-19 10:05:00',
+      ...overrides,
+    })
+
+    beforeEach(() => {
+      useSessionStore().me = me
+    })
+
+    /** Save a comment while the realtime echo arrives before/after the write. */
+    async function saveCommentWithEcho(order: 'echo-first' | 'http-first') {
+      const saved = rec({ id: 'c-new', body: 'hi' })
+      let handlers: RealtimeHandlers = {}
+      const mock = makeMockBackend({
+        subscribe: vi.fn((_project: string, h: RealtimeHandlers) => {
+          handlers = h
+          return () => {}
+        }),
+        createComment: vi.fn(async () => {
+          if (order === 'echo-first') handlers.onCommentCreate!(noName(saved))
+          return noName(saved)
+        }),
+      })
+      setBackend(mock)
+      const store = useCommentsStore()
+      store.startRealtime()
+      await store.setPath('/pricing')
+      store.enterPickMode()
+      store.beginCompose(anchor)
+
+      await store.saveComment('hi')
+      if (order === 'http-first') handlers.onCommentCreate!(noName(saved))
+      return store
+    }
+
+    /** Reply to a loaded thread while the realtime echo arrives before/after. */
+    async function addReplyWithEcho(order: 'echo-first' | 'http-first') {
+      const created = replyRec()
+      let handlers: RealtimeHandlers = {}
+      const mock = makeMockBackend({
+        listReplies: vi.fn().mockResolvedValue([]),
+        subscribe: vi.fn((_project: string, h: RealtimeHandlers) => {
+          handlers = h
+          return () => {}
+        }),
+        createReply: vi.fn(async () => {
+          if (order === 'echo-first') handlers.onReplyCreate!(noName(created))
+          return noName(created)
+        }),
+      })
+      setBackend(mock)
+      const store = useCommentsStore()
+      store.startRealtime()
+      await store.loadReplies('c1')
+
+      await store.addReply('c1', 'echo me')
+      if (order === 'http-first') handlers.onReplyCreate!(noName(created))
+      return store
+    }
+
+    it('keeps the author name on a comment when the echo lands first', async () => {
+      const store = await saveCommentWithEcho('echo-first')
+
+      expect(store.items).toHaveLength(1)
+      expect(store.items[0].authorName).toBe('Alice')
+    })
+
+    it('keeps the author name on a comment when the HTTP response lands first', async () => {
+      const store = await saveCommentWithEcho('http-first')
+
+      expect(store.items).toHaveLength(1)
+      expect(store.items[0].authorName).toBe('Alice')
+    })
+
+    it('keeps the author name on a reply when the echo lands first', async () => {
+      const store = await addReplyWithEcho('echo-first')
+
+      expect(store.replies.get('c1')).toHaveLength(1)
+      expect(store.replies.get('c1')![0].authorName).toBe('Alice')
+    })
+
+    it('keeps the author name on a reply when the HTTP response lands first', async () => {
+      const store = await addReplyWithEcho('http-first')
+
+      expect(store.replies.get('c1')).toHaveLength(1)
+      expect(store.replies.get('c1')![0].authorName).toBe('Alice')
     })
   })
 

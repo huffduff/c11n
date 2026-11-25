@@ -282,19 +282,32 @@ describe('createComment', () => {
       resolved: false,
       created: 'x',
       updated: 'x',
+      expand: { author: userRecord },
     })
 
     const rec = await backend.createComment(input)
 
     // The relation field gets the record id, NOT the slug the overlay sends —
     // sending the slug 400s against real PocketBase (missing_rel_records).
-    expect(pb.collection('comments').create).toHaveBeenCalledWith({
-      ...input,
-      project: 'pid1',
-      author: 'u1',
-    })
+    // The create expands the author so the returned record carries the display
+    // name itself: the realtime echo path backfills from the session, the HTTP
+    // path must not need that crutch.
+    expect(pb.collection('comments').create).toHaveBeenCalledWith(
+      {
+        ...input,
+        project: 'pid1',
+        author: 'u1',
+      },
+      { expand: 'author' },
+    )
     expect(rec).toEqual(
-      expect.objectContaining({ id: 'c9', author: 'u1', body: 'hello', resolved: false }),
+      expect.objectContaining({
+        id: 'c9',
+        author: 'u1',
+        body: 'hello',
+        resolved: false,
+        authorName: 'Alice',
+      }),
     )
   })
 })
@@ -347,15 +360,27 @@ describe('replies', () => {
       body: 'hi',
       author: 'u1',
       created: 'x',
+      expand: { author: userRecord },
     })
 
     const rec = await backend.createReply('c1', 'hi')
-    expect(pb.collection('replies').create).toHaveBeenCalledWith({
+    // Expanded like createComment: the create response carries the name.
+    expect(pb.collection('replies').create).toHaveBeenCalledWith(
+      {
+        comment: 'c1',
+        body: 'hi',
+        author: 'u1',
+      },
+      { expand: 'author' },
+    )
+    expect(rec).toEqual({
+      id: 'r2',
       comment: 'c1',
       body: 'hi',
       author: 'u1',
+      authorName: 'Alice',
+      created: 'x',
     })
-    expect(rec).toEqual({ id: 'r2', comment: 'c1', body: 'hi', author: 'u1', authorName: undefined, created: 'x' })
   })
 })
 

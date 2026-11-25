@@ -18,6 +18,17 @@ export interface ResolvedPin {
 const EMPTY_META: AnchorMeta = { tag: '', text: '', rect: { x: 0, y: 0, width: 0, height: 0 } }
 
 /**
+ * Keep the display name across an upsert: `rec` is the fresher record, but
+ * realtime events and unexpanded create responses arrive without an author
+ * name while the record already in the store may have been backfilled from
+ * the session. Prefer the incoming name, fall back to the one we hold.
+ */
+function withAuthorName<T extends { authorName?: string }>(rec: T, prev?: T): T {
+  if (rec.authorName !== undefined) return rec
+  return prev ? { ...rec, authorName: prev.authorName } : rec
+}
+
+/**
  * Comments for the current page + the comment-mode state machine.
  *
  * Mode lifecycle: `off` → enterPickMode → `pick` → (element clicked)
@@ -159,10 +170,16 @@ export const useCommentsStore = defineStore('comments', {
     },
 
     // Realtime hooks (wired by startRealtime, Task 12).
+    /**
+     * Upsert by id. Realtime events carry no `expand.author`, but the store
+     * backfills our own records from the session; a later unexpanded record
+     * (e.g. a create response) must not erase that name — the UI would fall
+     * back to the literal "author".
+     */
     upsertFromRealtime(rec: CommentRec) {
       const i = this.items.findIndex((c) => c.id === rec.id)
       if (i === -1) this.items.push(rec)
-      else this.items[i] = rec
+      else this.items[i] = withAuthorName(rec, this.items[i])
     },
 
     removeFromRealtime(id: string) {
@@ -173,7 +190,7 @@ export const useCommentsStore = defineStore('comments', {
     upsertSidebarComment(rec: CommentRec) {
       const i = this.sidebarComments.findIndex((c) => c.id === rec.id)
       if (i === -1) this.sidebarComments.push(rec)
-      else this.sidebarComments[i] = rec
+      else this.sidebarComments[i] = withAuthorName(rec, this.sidebarComments[i])
     },
 
     // ------------------------------------------------------------------
@@ -356,7 +373,7 @@ export const useCommentsStore = defineStore('comments', {
       const next = [...this.replies.get(commentId)!]
       const i = next.findIndex((r) => r.id === reply.id)
       if (i === -1) next.push(reply)
-      else next[i] = reply
+      else next[i] = withAuthorName(reply, next[i])
       this.replies.set(commentId, next)
     },
 

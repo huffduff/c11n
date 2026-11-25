@@ -155,9 +155,12 @@ export function createPocketBaseBackend(baseUrl = '/__c11n/pb'): C11nBackend {
     async createComment(input) {
       const me = requireAuth()
       const projectId = await resolveProjectId(input.project)
+      // Expand the author: the create response is upserted over the realtime
+      // echo, and the echo carries no expand — without this the HTTP record
+      // (authorName undefined) would blank the name backfilled from session.
       const rec = await pb
         .collection('comments')
-        .create({ ...input, project: projectId, author: me.id })
+        .create({ ...input, project: projectId, author: me.id }, { expand: 'author' })
       return mapComment(rec)
     },
 
@@ -176,11 +179,16 @@ export function createPocketBaseBackend(baseUrl = '/__c11n/pb'): C11nBackend {
 
     async createReply(commentId, body) {
       const me = requireAuth()
-      const rec = await pb.collection('replies').create({
-        comment: commentId,
-        body,
-        author: me.id,
-      })
+      // Same reason as createComment: keep the display name on the record the
+      // caller upserts over the (unexpanded) realtime echo.
+      const rec = await pb.collection('replies').create(
+        {
+          comment: commentId,
+          body,
+          author: me.id,
+        },
+        { expand: 'author' },
+      )
       return mapReply(rec)
     },
 

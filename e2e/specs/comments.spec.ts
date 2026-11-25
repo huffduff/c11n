@@ -152,6 +152,11 @@ test.describe('B4 — one pin per saved comment', () => {
       await page.waitForTimeout(100)
     }
     expect([...counts].sort()).toEqual([1])
+
+    // The saved comment's author name survives whichever of the realtime echo
+    // and the HTTP response landed second — neither may blank it to "author".
+    await page.locator('.c11n-pin').click()
+    await expect(page.locator('.c11n-popover-author')).toContainText(user.name)
   })
 })
 
@@ -276,6 +281,10 @@ test.describe('reply and resolve', () => {
 
     await expect(page.locator('.c11n-popover-reply-body')).toHaveCount(1, { timeout: 5_000 })
     expect((await listReplies(seeded.id)).length).toBe(1)
+
+    // Same race as the body dedupe: the reply's author name must survive the
+    // echo/HTTP upsert, not degrade to the literal "author".
+    await expect(page.locator('.c11n-popover-reply .c11n-popover-author')).toHaveText(user.name)
   })
 })
 

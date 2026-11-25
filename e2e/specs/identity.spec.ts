@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto'
 import { expect, test, type APIRequestContext } from '@playwright/test'
 import {
   bootstrapInviteLink,
+  createUser,
   createUserWithRole,
   directMagicUrl,
   inviteAs,
@@ -506,5 +507,28 @@ test.describe('3.6 session, me and logout', () => {
     expect(parsed.attributes).toContain('path=/')
     expect(parsed.attributes).toContain('httponly')
     expect(parsed.attributes).toContain('samesite=lax')
+  })
+})
+
+test.describe('3.9 no password exists', () => {
+  test('password auth is disabled on the users collection', async ({ request }) => {
+    const res = await request.get(
+      `${readCreds().pbUrl}/api/collections/users?fields=passwordAuth,otp,oauth2`,
+      { headers: { authorization: await superuserTokenFor() } },
+    )
+    expect(res.status(), await res.text()).toBe(200)
+    const body = (await res.json()) as { passwordAuth?: { enabled?: boolean } }
+    expect(body.passwordAuth?.enabled).toBe(false)
+  })
+
+  test('auth-with-password is refused, even with the right password', async ({ request }) => {
+    // createUser still sets a password (PocketBase needs one for an auth
+    // record); the endpoint that could turn it into a token is off.
+    const user = await createUser(undefined, 'Password Probe')
+    const res = await request.post(
+      `${readCreds().pbUrl}/api/collections/users/auth-with-password`,
+      { data: { identity: user.email, password: 'password123456' } },
+    )
+    expect([400, 403]).toContain(res.status())
   })
 })

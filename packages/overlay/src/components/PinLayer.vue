@@ -13,6 +13,7 @@
 import { onBeforeUnmount, ref, watch } from 'vue'
 import { useCommentsStore } from '../stores/comments'
 import { trackElements } from '../lib/tracker'
+import type { ElementTracker } from '../lib/tracker'
 import type { CommentRec } from '../lib/types'
 
 const store = useCommentsStore()
@@ -23,7 +24,7 @@ const rects = ref(new Map<string, DOMRect>())
 
 // Element refs stay out of reactive state (same rule as picker.ts).
 let targets = new Map<string, Element>()
-let stopTracking: (() => void) | null = null
+let tracker: ElementTracker | null = null
 let resolving = false
 
 /** Re-run anchor resolution against the live DOM and swap the target set. */
@@ -41,11 +42,11 @@ function reresolve() {
   }
 }
 
-/** Full restart: new page/items → resolve + (re)start the tracker. */
+/** Full restart: new page/items → resolve + (re)start/recompute the tracker. */
 function refresh() {
   reresolve()
-  if (!stopTracking) {
-    stopTracking = trackElements(
+  if (!tracker) {
+    tracker = trackElements(
       () => targets,
       (next, causes) => {
         // Mutations may have added/removed anchored elements — re-resolve
@@ -54,6 +55,11 @@ function refresh() {
         rects.value = next
       },
     )
+  } else {
+    // Items/path changed but the document may not have: force a recompute
+    // for the freshly resolved targets, or pins stay display:none until the
+    // next scroll/resize (B3).
+    tracker.refresh()
   }
 }
 
@@ -62,8 +68,8 @@ function refresh() {
 // Deep: resolve() flips items[i].resolved in place and the pin must drop.
 watch(() => [store.items, store.currentPath], refresh, { deep: true, immediate: true })
 onBeforeUnmount(() => {
-  stopTracking?.()
-  stopTracking = null
+  tracker?.stop()
+  tracker = null
 })
 
 function pinStyle(id: string): Record<string, string> {

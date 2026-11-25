@@ -24,13 +24,22 @@ export type TrackCause = 'initial' | 'scroll' | 'resize' | 'mutation'
  * (0,0), which would render UI pinned to the viewport corner. Callers treat
  * a missing rect as "hide" and may re-resolve on mutation causes.
  *
- * Returns a cleanup function that removes the listeners, disconnects the
- * observer, and cancels/neutralizes any pending frame.
+ * Returns `{ stop, refresh }`. `stop` removes the listeners, disconnects the
+ * observer, and cancels/neutralizes any pending frame. `refresh` forces an
+ * immediate recompute on the next frame (no scroll or resize needed) — a
+ * caller that re-resolved its target set (elements rendered late, items
+ * loaded after mount) has no DOM mutation to rely on when the *targets*
+ * changed but the document did not.
  */
+export interface ElementTracker {
+  stop: () => void
+  refresh: () => void
+}
+
 export function trackElements(
   getTargets: () => Map<string, Element>,
   onUpdate: (rects: Map<string, DOMRect>, causes: Set<TrackCause>) => void,
-): () => void {
+): ElementTracker {
   let dirty = false
   let stopped = false
   let rafId = 0
@@ -83,11 +92,15 @@ export function trackElements(
 
   schedule('initial') // initial rects
 
-  return () => {
+  const stop = () => {
     stopped = true
     window.removeEventListener('scroll', onScroll, { capture: true })
     window.removeEventListener('resize', onResize)
     observer.disconnect()
     caf(rafId)
   }
+
+  // Explicit recompute for callers whose target set changed without a DOM
+  // mutation; 'mutation' is the cause that makes them re-resolve first.
+  return { stop, refresh: () => schedule('mutation') }
 }

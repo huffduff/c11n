@@ -17,16 +17,12 @@ import {
  *
  * Specs marked `test.fail()` / `test.fixme()` describe the CORRECT behaviour
  * of a known open bug and stay visible until Phase 2 fixes it:
- *   - B3  (fixme, ~5/10 flaky): pins stay display:none until scroll/resize
  *   - B4  (fail, 10/10): a saved comment renders two pins (realtime echo)
  *   - reply echo (fixme, 10/10 in isolation): a UI reply renders twice
  * Each becomes a passing spec the moment its fix lands.
  *
  * Pins are `.c11n-pin` inside the overlay's open shadow root; Playwright's CSS
- * locators pierce it. B3 leaves pins with `display:none` until a scroll or
- * resize, so DOM-presence assertions (`toHaveCount`) are used wherever
- * visibility is not the subject — otherwise the bug would masquerade as
- * "there is no comment".
+ * locators pierce it.
  */
 
 const PASSWORD = 'password123456'
@@ -117,12 +113,7 @@ test.describe('B2 — comment creation', () => {
 })
 
 test.describe('B3 — pins visible on load', () => {
-  // B3: pins hidden until scroll/resize; see assessment.
-  // fixme: the failure is a race with the tracker's first rAF (a fast comment
-  // load lands before it, a slow one after), reproduced 5/10 under
-  // --repeat-each=10 — `test.fail()` would flake, so this stays skipped until
-  // Phase 2's recompute-on-target-change fix makes it deterministic.
-  test.fixme('a seeded comment renders its pin without scroll or resize', async ({ page }) => {
+  test('a seeded comment renders its pin without scroll or resize', async ({ page }) => {
     const user = await createUser(undefined, 'B3 Seeder')
     await seedComment({ author: user.id, path: '/', selector: '#hero-title', body: 'anchored' })
 
@@ -183,7 +174,6 @@ test.describe('realtime', () => {
 
       await createViaUi(pageA, 'hello from alice')
 
-      // B3 may leave Bob's pin display:none, so assert on the DOM count.
       await expect(pageB.locator('.c11n-pin')).toHaveCount(1, { timeout: 5_000 })
     } finally {
       await ctxA.close()
@@ -230,9 +220,7 @@ test.describe('reply and resolve', () => {
       await signedIn(pageA, alice.email, alice.name)
       await signedIn(pageB, bob.email, bob.name)
 
-      // B3 leaves pins display:none, so open the thread from the sidebar row
-      // (same store action `openThread`) instead of clicking a pin that
-      // Playwright cannot see.
+      // Open the thread from the sidebar row (same store action `openThread`).
       await pageA.locator('.c11n-sidebar-toggle').click()
       await expect(pageA.locator('.c11n-sidebar-row')).toHaveCount(1)
       await pageA.locator('.c11n-sidebar-row').click()

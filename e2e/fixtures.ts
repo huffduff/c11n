@@ -186,6 +186,26 @@ export async function listComments(): Promise<PbComment[]> {
   return body.items
 }
 
+export interface PbReply {
+  id: string
+  comment: string
+  body: string
+  author: string
+  created: string
+}
+
+/** Replies of one comment, as stored (superuser view: no rule filtering). */
+export async function listReplies(commentId: string): Promise<PbReply[]> {
+  const creds = readCreds()
+  const res = await (await ctx()).get(
+    `${creds.pbUrl}/api/collections/replies/records?perPage=200&sort=created&filter=` +
+      encodeURIComponent(`comment='${commentId}'`),
+    { headers: { authorization: await superuserTokenFor() } },
+  )
+  const body = await json<{ items: PbReply[] }>(res)
+  return body.items
+}
+
 /**
  * Sign in through the overlay's own UI: chip → email/password → submit, then
  * wait for the authed toolbar. Deliberately drives the real form (not

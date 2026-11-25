@@ -29,6 +29,10 @@ STATE_DIR="${C11N_STACK_DIR:-$REPO_ROOT/.stack}"
 PB_PORT=18090
 DEMO_PORT=15173
 CADDY_PORT=18080
+# The demo vite is the workspace's hoisted install: never `npx vite`, which
+# would silently download an unpinned copy when node_modules is missing.
+DEMO_DIR="$REPO_ROOT/examples/demo-vue"
+VITE_BIN="$REPO_ROOT/node_modules/.bin/vite"
 ADMIN_EMAIL="e2e-admin@c11n.test"
 SERVICES="pocketbase demo caddy"
 START_TIMEOUT="${C11N_STACK_TIMEOUT:-30}"
@@ -60,6 +64,40 @@ read_pid() {
 # pgid_of <pid>: prints the process group id, empty if the pid is gone.
 pgid_of() {
 	ps -o pgid= -p "$1" 2>/dev/null | tr -d ' '
+}
+
+# service_marker <name>: a substring of the command line we expect for that
+# service. Killing by pidfile is only safe while the pid still runs what we
+# started: after a crash or reboot the pid may have been reused by an
+# unrelated process, and the pgid==pid check alone cannot tell the difference.
+service_marker() {
+	case "$1" in
+	pocketbase) printf 'pocketbase serve' ;;
+	caddy) printf 'caddy run' ;;
+	demo) printf 'vite' ;;
+	*) return 1 ;;
+	esac
+}
+
+# cmdline_of <pid>: the full argv of the process, empty if it is gone.
+cmdline_of() {
+	ps -o args= -p "$1" 2>/dev/null | head -n1
+}
+
+# pid_is_service <name> <pid>: live, group leader, and its argv still matches
+# the service. Anything else means the pidfile outlived what it described.
+pid_is_service() {
+	local name="$1" pid="$2" pgid marker args
+	is_alive "$pid" || return 1
+	pgid="$(pgid_of "$pid" || true)"
+	[ "$pgid" = "$pid" ] || return 1
+	marker="$(service_marker "$name" || true)"
+	[ -n "$marker" ] || return 0
+	args="$(cmdline_of "$pid" || true)"
+	case "$args" in
+	*"$marker"*) return 0 ;;
+	esac
+	return 1
 }
 
 # port_in_use <port>: succeeds when something accepts TCP on 127.0.0.1:<port>.
@@ -172,16 +210,14 @@ wait_for() {
 	done
 }
 
-# running_services: names whose pidfile points at a live process group.
+# running_services: names whose pidfile points at a live process group that
+# still looks like the service.
 running_services() {
-	local svc pid pgid
+	local svc pid
 	for svc in $SERVICES; do
 		pid="$(read_pid "$svc" || true)"
 		[ -n "$pid" ] || continue
-		pgid="$(pgid_of "$pid" || true)"
-		if [ -n "$pgid" ] && [ "$pgid" = "$pid" ]; then
-			printf '%s\n' "$svc"
-		fi
+		pid_is_service "$svc" "$pid" && printf '%s\n' "$svc"
 	done
 	return 0
 }
@@ -212,6 +248,19 @@ cmd_up() {
 
 	command -v setsid >/dev/null 2>&1 ||
 		die "setsid is required (util-linux): each service must run in its own process group so 'down' can stop its whole tree"
+
+	# The local stack's upstream is always plain http, so verifying TLS is the
+	# only meaningful setting. An ambient C11N_UPSTREAM_TLS would either be
+	# silently ignored or (as "insecure") misdescribe the stack; refuse instead.
+	case "${C11N_UPSTREAM_TLS:-verify}" in
+	"" | verify) ;;
+	*)
+		die "C11N_UPSTREAM_TLS=${C11N_UPSTREAM_TLS} does not apply to the local stack: its upstream is http://127.0.0.1:$DEMO_PORT (plain http, no TLS). Unset it, or set C11N_UPSTREAM_TLS=verify."
+		;;
+	esac
+
+	[ -x "$VITE_BIN" ] ||
+		die "$VITE_BIN is missing; run 'npm ci' at the repo root (the demo must not fetch its own vite)"
 
 	[ -f "$REPO_ROOT/packages/overlay/dist/overlay.js" ] ||
 		die "packages/overlay/dist/overlay.js is missing; run 'npm run build' at the repo root"
@@ -247,8 +296,13 @@ cmd_up() {
 		die "pocketbase superuser upsert failed"
 	fi
 
-	printf '{"email":"%s","password":"%s","pbUrl":"http://127.0.0.1:%s","baseUrl":"http://127.0.0.1:%s"}\n' \
-		"$ADMIN_EMAIL" "$pw" "$PB_PORT" "$CADDY_PORT" >"$STATE_DIR/creds.json"
+	# umask 077 in a subshell: the file is never briefly world-readable, which
+	# a post-hoc chmod would allow.
+	(
+		umask 077
+		printf '{"email":"%s","password":"%s","pbUrl":"http://127.0.0.1:%s","baseUrl":"http://127.0.0.1:%s"}\n' \
+			"$ADMIN_EMAIL" "$pw" "$PB_PORT" "$CADDY_PORT" >"$STATE_DIR/creds.json"
+	)
 	chmod 600 "$STATE_DIR/creds.json"
 
 	start_service pocketbase "$pb" serve \
@@ -259,8 +313,8 @@ cmd_up() {
 	wait_for pocketbase "http://127.0.0.1:$PB_PORT/api/health"
 
 	(
-		cd "$REPO_ROOT/examples/demo-vue"
-		start_service demo npx vite --host 127.0.0.1 --port "$DEMO_PORT" --strictPort
+		cd "$DEMO_DIR"
+		start_service demo "$VITE_BIN" --host 127.0.0.1 --port "$DEMO_PORT" --strictPort
 	)
 	wait_for demo "http://127.0.0.1:$DEMO_PORT/"
 
@@ -269,7 +323,9 @@ cmd_up() {
 		export C11N_PB_ADDR="127.0.0.1:$PB_PORT"
 		export C11N_OVERLAY_DIR="$REPO_ROOT/packages/overlay/dist"
 		export C11N_UPSTREAM="http://127.0.0.1:$DEMO_PORT"
-		export C11N_UPSTREAM_TLS="${C11N_UPSTREAM_TLS:-verify}"
+		# Always "verify": the upstream is plain http (see the guard in up), and
+		# an empty value would make Caddy read it as set.
+		export C11N_UPSTREAM_TLS="verify"
 		export XDG_DATA_HOME="$STATE_DIR/caddy/data"
 		export XDG_CONFIG_HOME="$STATE_DIR/caddy/config"
 		start_service caddy "$caddy" run \
@@ -289,7 +345,7 @@ cmd_up() {
 
 # stop_service <name>: terminate the recorded process group, by pidfile only.
 stop_service() {
-	local name="$1" pidfile pid pgid i
+	local name="$1" pidfile pid pgid i marker args
 	pidfile="$(pid_file "$name")"
 	pid="$(read_pid "$name" || true)"
 	if [ -z "$pid" ]; then
@@ -301,9 +357,23 @@ stop_service() {
 		rm -f "$pidfile"
 		return 0
 	fi
+	marker="$(service_marker "$name" || true)"
+	args="$(cmdline_of "$pid" || true)"
+	if [ -n "$marker" ]; then
+		case "$args" in
+		*"$marker"*) ;;
+		*)
+			log "warning: $name pid $pid does not look like '$marker' (cmd: ${args:-unreadable}); leaving it alone"
+			log "$name: removed stale pidfile $pidfile"
+			rm -f "$pidfile"
+			return 0
+			;;
+		esac
+	fi
 	pgid="$(pgid_of "$pid" || true)"
 	if [ "$pgid" != "$pid" ]; then
 		log "warning: $name pid $pid is not a process-group leader (pgid ${pgid:-?}); leaving it alone"
+		log "$name: removed stale pidfile $pidfile"
 		rm -f "$pidfile"
 		return 0
 	fi
@@ -330,12 +400,10 @@ cmd_down() {
 }
 
 cmd_status() {
-	local svc pid pgid state
+	local svc pid state
 	for svc in $SERVICES; do
 		pid="$(read_pid "$svc" || true)"
-		pgid=""
-		[ -n "$pid" ] && pgid="$(pgid_of "$pid" || true)"
-		if [ -n "$pgid" ] && [ "$pgid" = "$pid" ]; then
+		if [ -n "$pid" ] && pid_is_service "$svc" "$pid"; then
 			state="running (pid $pid)"
 		else
 			state="stopped"

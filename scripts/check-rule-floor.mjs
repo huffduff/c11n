@@ -160,6 +160,21 @@ async function main() {
     check(rule.includes(`@request.body.${field}:isset = false`), `updateRule requires ${field} to be unset for non-authors`)
   }
 
+  // C1: `users` carries the same kind of floor. Without it, this script's
+  // empty hooks dir means a self-promotion PATCH is allowed by the rule —
+  // which is the exact deployment hole the migration closes.
+  const usersCollection = await api('GET', '/api/collections/users', { token: su })
+  const usersRule = String(usersCollection.json?.updateRule ?? '')
+  console.log('applied users.updateRule:', usersRule)
+  check(usersRule.includes('id = @request.auth.id'), 'users.updateRule still scopes the update to the account itself')
+  for (const field of ['role', 'email', 'verified']) {
+    check(
+      usersRule.includes(`@request.body.${field}:isset = false`),
+      `users.updateRule requires ${field} to be unset for the account itself`,
+    )
+  }
+  check(usersCollection.json?.createRule === null, 'users.createRule is still null (no public signup)')
+
   // 2. fixtures: two projects, two users, one comment (seq set by hand —
   //    without pb_hooks nothing assigns it).
   const projectRes = await api('GET', `/api/collections/projects/records?perPage=1&filter=${encodeURIComponent("slug='default'")}`, { token: su })
@@ -210,6 +225,24 @@ async function main() {
   check(after.json?.author === alice.id, 'author is unchanged after the rejected PATCH')
   check(Number(after.json?.seq) === 1, `seq is unchanged after the rejected PATCH (got ${after.json?.seq})`)
   check(after.json?.project === project, 'project is unchanged after the rejected PATCH')
+
+  // C1: the same attack against the account's own record. With an empty hooks
+  // dir only the rule stands between a client and the owner role.
+  const userUrl = `/api/collections/users/records/${bob.id}`
+  const userAttempts = [
+    ['role', { role: 'owner' }, 404],
+    ['verified', { verified: true }, 404],
+    ['email', { email: `hijack-${Date.now()}@c11n.test` }, 404],
+    // Control: a field the floor leaves self-service.
+    ['name', { name: 'Bob Renamed' }, 200],
+  ]
+  for (const [field, data, expected] of userAttempts) {
+    const res = await api('PATCH', userUrl, { token: bobToken, data })
+    check(res.status === expected, `self-PATCH {${field}} -> ${res.status} (expected ${expected})`)
+  }
+  const bobAfter = await api('GET', userUrl, { token: su })
+  check(bobAfter.json?.role === 'client', `role is unchanged after the rejected PATCH (got ${bobAfter.json?.role})`)
+  check(bobAfter.json?.verified === false, 'verified is unchanged after the rejected PATCH')
 }
 
 try {

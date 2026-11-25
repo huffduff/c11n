@@ -21,6 +21,45 @@
 //    `newStaticAuthToken(60)` is a token that expired 60ns after minting, and
 //    `findAuthRecordByToken` rejects it with "token is expired".
 
+onRecordUpdateRequest((e) => {
+  // Superuser is the repair path (the invite route is a hook, not a request,
+  // so it is unaffected by this: hook-driven saves do not fire request hooks).
+  if (e.hasSuperuserAuth()) {
+    return e.next()
+  }
+  const original = e.record.original()
+  // C1 (security review): `users.updateRule` only says `id = @request.auth.id`,
+  // so without this hook any signed-in user could PATCH their own record to
+  // `{"role":"owner"}` — through the proxy, with nothing but the cookie.
+  // `verified` and `email` are closed for the same reason: promoting yourself
+  // to a verified account, or moving the record onto someone else's address,
+  // are both privilege changes.
+  //
+  // 400, not 403: a body carrying these fields is a malformed update, and 400
+  // is the choice immutable.pb.js makes. Note the ORDER: PocketBase checks the
+  // collection rule before this hook, so a guarded field normally answers 404
+  // from migration 1764001100's floor; this hook answers 400 when the rule
+  // passes the body through (name), and is the guard that still works if the
+  // rule is ever relaxed.
+  const guarded = ["role", "verified", "email"]
+  for (let i = 0; i < guarded.length; i++) {
+    const field = guarded[i]
+    const before = String(original.get(field) ?? "")
+    const after = String(e.record.get(field) ?? "")
+    if (before !== after) {
+      throw new BadRequestError(field + " cannot be changed by the account itself")
+    }
+  }
+  // `name` stays self-service, but capped: the name is what the audit trail
+  // shows, so an 80-byte ceiling keeps one account from impersonating with a
+  // 4 KB display name.
+  const name = String(e.record.get("name") ?? "")
+  if (name.length > 80) {
+    throw new BadRequestError("name must be at most 80 characters")
+  }
+  e.next()
+}, "users")
+
 // ---- 3.1: role default ----------------------------------------------------
 // `users.role` is a required select (migration 1764001000) and PocketBase
 // select fields have no default value, so new users get `client` here —

@@ -12,9 +12,11 @@ import {
   parseSetCookie,
   patchInvite,
   readCreds,
+  sessionCookie,
   sessionToken,
   superuserTokenFor,
   userByEmail,
+  userToken,
 } from '../fixtures'
 
 /**
@@ -530,5 +532,127 @@ test.describe('3.9 no password exists', () => {
       { data: { identity: user.email, password: 'password123456' } },
     )
     expect([400, 403]).toContain(res.status())
+  })
+})
+
+/**
+ * C1 (security review): the default `users.updateRule` is `id = @request.auth.id`,
+ * so an authenticated user could PATCH their own record with `{"role":"owner"}`.
+ * Through the proxy that only needs the session cookie — no token, no password.
+ *
+ * The guard is two-layered on purpose:
+ *   - `onRecordUpdateRequest` on `users` rejects any change to role/verified/
+ *     email unless the caller is a superuser (and caps `name` at 80 bytes);
+ *   - migration 1764001100 floors `users.updateRule` with
+ *     `@request.body.{role,email,verified}:isset = false`, so a deployment
+ *     that ships migrations but forgets pb_hooks is still closed.
+ * A PATCH that does not mention those fields is untouched: the role default
+ * hook and the overlay never write them.
+ */
+test.describe('C1 users cannot change their own privileged fields', () => {
+  const PB = readCreds().pbUrl
+
+  /** PATCH a users record as `user`, either with a cookie or a bearer. */
+  async function selfPatch(
+    request: APIRequestContext,
+    user: { id: string },
+    data: Record<string, unknown>,
+    auth: { cookie?: string; bearer?: string },
+  ) {
+    return request.patch(`${PB}/api/collections/users/records/${user.id}`, {
+      data,
+      headers: {
+        ...(auth.cookie ? { cookie: auth.cookie } : {}),
+        ...(auth.bearer ? { authorization: auth.bearer } : {}),
+      },
+    })
+  }
+
+  test('through the proxy (cookie only) a self-promotion is rejected', async ({ request }) => {
+    // A real magic-link session: this is the attack the reviewer ran.
+    const user = await createUser(undefined, 'C1 Proxy', 'client')
+    const cookie = await sessionCookie(user.email)
+    const me = await request.get(`${PB}/api/c11n/me`, { headers: { cookie } })
+    const { id } = (await me.json()) as { id: string }
+    expect(id).toBe(user.id)
+
+    const res = await request.patch(`/__c11n/pb/api/collections/users/records/${id}`, {
+      headers: { cookie },
+      data: { role: 'owner' },
+    })
+    // PocketBase evaluates the collection rule before the update request hook,
+    // so the rule floor answers 404 and the hook's 400 is only reachable for a
+    // body the rule lets through (name). Both are a rejection; the field is
+    // asserted unchanged below.
+    expect([400, 404]).toContain(res.status())
+
+    const after = await request.get(`${PB}/api/collections/users/records/${id}`, {
+      headers: { authorization: await superuserTokenFor() },
+    })
+    expect(((await after.json()) as { role: string }).role).toBe('client')
+  })
+
+  test('directly with a bearer token a self-promotion is rejected', async ({ request }) => {
+    const user = await createUser(undefined, 'C1 Bearer', 'client')
+    const bearer = await userToken(user.email)
+    const res = await selfPatch(request, user, { role: 'owner' }, { bearer })
+    expect([400, 404], await res.text()).toContain(res.status())
+    expect((await userByEmail(user.email))!.role).toBe('client')
+  })
+
+  test('a demotion attempt is rejected too', async ({ request }) => {
+    const user = await createUserWithRole('team')
+    const res = await selfPatch(request, user, { role: 'client' }, { bearer: user.token })
+    expect([400, 404], await res.text()).toContain(res.status())
+    expect((await userByEmail(user.email))!.role).toBe('team')
+  })
+
+  test('verified and email cannot be self-written either', async ({ request }) => {
+    const user = await createUserWithRole('client')
+    for (const data of [{ verified: true }, { email: `c1-hijack-${Date.now()}@example.test` }]) {
+      const res = await selfPatch(request, user, data, { bearer: user.token })
+      expect([400, 404], `${JSON.stringify(data)}: ${await res.text()}`).toContain(res.status())
+    }
+    const after = await userByEmail(user.email)
+    expect(after).toBeDefined()
+  })
+
+  test('name may change, but only up to 80 characters', async ({ request }) => {
+    const user = await createUserWithRole('client')
+    const ok = await selfPatch(request, user, { name: 'Rename Reviewer' }, { bearer: user.token })
+    expect(ok.status(), await ok.text()).toBe(200)
+    expect((await userByEmail(user.email))!.name).toBe('Rename Reviewer')
+
+    const tooLong = await selfPatch(request, user, { name: 'x'.repeat(81) }, { bearer: user.token })
+    expect(tooLong.status(), await tooLong.text()).toBe(400)
+    expect((await userByEmail(user.email))!.name).toBe('Rename Reviewer')
+  })
+
+  test('a superuser can still change a role', async ({ request }) => {
+    const user = await createUser(undefined, 'C1 Superuser', 'client')
+    const res = await request.patch(`${PB}/api/collections/users/records/${user.id}`, {
+      headers: { authorization: await superuserTokenFor() },
+      data: { role: 'team' },
+    })
+    expect(res.status(), await res.text()).toBe(200)
+    expect((await userByEmail(user.email))!.role).toBe('team')
+  })
+
+  test('/session still reports the original role after the attempt', async ({ request }) => {
+    const user = await createUser(undefined, 'C1 Session', 'client')
+    const cookie = await sessionCookie(user.email)
+    const me = await request.get(`${PB}/api/c11n/me`, { headers: { cookie } })
+    const { id } = (await me.json()) as { id: string }
+
+    await request.patch(`${PB}/api/collections/users/records/${id}`, {
+      headers: { cookie },
+      data: { role: 'owner' },
+    })
+
+    const session = await request.get(`${PB}/api/c11n/session`, {
+      headers: { cookie, accept: 'application/json' },
+    })
+    expect(session.status()).toBe(200)
+    expect(session.headers()['x-c11n-role']).toBe('client')
   })
 })

@@ -1,6 +1,9 @@
 # Dependencies
 node_modules/
 
+# Locally fetched pinned binaries (scripts/fetch-tools.sh)
+.tools/
+
 # Build artifacts
 dist/
 build/

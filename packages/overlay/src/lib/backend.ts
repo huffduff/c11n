@@ -11,9 +11,9 @@ let impl: C11nBackend = createPocketBaseBackend()
  * `setBackend` without touching module caches.
  */
 export const backend: C11nBackend = {
-  login: (email, password) => impl.login(email, password),
-  logout: () => impl.logout(),
   me: () => impl.me(),
+  logout: () => impl.logout(),
+  invite: (email, role) => impl.invite(email, role),
   // Arity-preserving: an omitted path must reach the impl as an omitted
   // argument (project-wide sidebar query), not an explicit undefined.
   listComments: (project, path) =>

@@ -1,17 +1,24 @@
-import PocketBase from 'pocketbase'
-import type { CommentRec, Me, NewComment, RealtimeHandlers, ReplyRec } from './types'
+import PocketBase, { BaseAuthStore } from 'pocketbase'
+import type { CommentRec, InviteResult, Me, NewComment, RealtimeHandlers, ReplyRec, Role } from './types'
 
-export type { CommentRec, Me, NewComment, RealtimeHandlers, ReplyRec }
+export type { CommentRec, InviteResult, Me, NewComment, RealtimeHandlers, ReplyRec, Role }
 
 /**
  * Swappable data-access layer for the overlay. The UI only ever talks to
  * this interface; `createPocketBaseBackend` is the v1 implementation.
- * A later Go swap reimplements these 8 methods + SSE behind `subscribe`.
+ * A later Go swap reimplements these methods + SSE behind `subscribe`.
+ *
+ * Identity is the proxy's, not the page's (ADR 0006): the backend never holds
+ * a token, `me()` reads the session cookie through the proxy and `logout()`
+ * clears that cookie before leaving for the sign-in page.
  */
 export interface C11nBackend {
-  login(email: string, password: string): Promise<Me>
-  logout(): void
-  me(): Me | null
+  /** The signed-in user, or null when the session cookie is gone/expired. */
+  me(): Promise<Me | null>
+  /** Clears the cookie (public route) and navigates to the sign-in page. */
+  logout(): Promise<void>
+  /** Owner/team: mint a copy-link invite for `email` at `role`. */
+  invite(email: string, role: Role): Promise<InviteResult>
   /**
    * Comments sorted by `created` asc. With `path`: the hot per-page query.
    * Without `path`: every comment in the project (sidebar listing) — any
@@ -29,7 +36,16 @@ export interface C11nBackend {
 type AnyRecord = { [key: string]: any }
 
 export function createPocketBaseBackend(baseUrl = '/__c11n/pb'): C11nBackend {
-  const pb = new PocketBase(baseUrl)
+  // An in-memory auth store on purpose: the SDK's default LocalAuthStore
+  // persists a token in localStorage, which is exactly the exposure ADR 0006
+  // removes. The SDK never authenticates here at all — Caddy turns the
+  // httpOnly c11n_session cookie into Authorization for /__c11n/pb/*.
+  const pb = new PocketBase(baseUrl, new BaseAuthStore())
+
+  // Last successful `me()`. Writes need the author id, and the SDK has no
+  // record to read it from — every request is authenticated by the proxy, not
+  // by a token this page owns.
+  let current: Me | null = null
 
   // The overlay deals in project *slugs* (`window.__C11N_PROJECT` → 'default'),
   // but PocketBase stores `comments.project` as a relation holding the project
@@ -61,7 +77,7 @@ export function createPocketBaseBackend(baseUrl = '/__c11n/pb'): C11nBackend {
   }
 
   function mapMe(r: AnyRecord): Me {
-    return { id: r.id, email: r.email, name: r.name || r.email }
+    return { id: r.id, email: r.email, name: r.name || r.email, role: (r.role as Role) ?? 'client' }
   }
 
   /** Display name from an expanded author relation, if present. */
@@ -113,28 +129,65 @@ export function createPocketBaseBackend(baseUrl = '/__c11n/pb'): C11nBackend {
     }
   }
 
-  /** Current auth record or throw — used by writes that inject `author`. */
-  function requireAuth(): AnyRecord {
-    const r = pb.authStore.record
-    if (!r) throw new Error('c11n: not signed in')
-    return r
+  /** The session user, or throw — used by writes that inject `author`. */
+  function requireAuth(): Me {
+    if (!current) throw new Error('c11n: not signed in')
+    return current
   }
 
   return {
-    async login(email, password) {
-      const res = await pb.collection('users').authWithPassword(email, password)
-      return mapMe(res.record)
+    async me() {
+      const res = await fetch(`${baseUrl}/api/c11n/me`, {
+        headers: { Accept: 'application/json' },
+        // Same origin, and the cookie is HttpOnly: the browser attaches it and
+        // Caddy turns it into Authorization before PocketBase sees the request.
+        credentials: 'same-origin',
+      })
+      if (res.status === 401) {
+        current = null
+        return null
+      }
+      if (!res.ok) throw new Error(`c11n: me failed (${res.status})`)
+      const body = (await res.json()) as AnyRecord
+      current = mapMe(body)
+      return current
     },
 
-    logout() {
+    async logout() {
+      current = null
       pb.authStore.clear()
+      try {
+        await fetch('/__c11n/auth/logout', { method: 'POST', credentials: 'same-origin' })
+      } finally {
+        // Leave even if clearing failed: staying on a page the gate will
+        // reject on the next request is worse than one extra sign-in.
+        location.assign('/__c11n/auth/?reason=signed-out')
+      }
     },
 
-    me() {
-      // authStore is hydrated from localStorage by the SDK, so this reflects
-      // persisted sessions across page loads.
-      const r = pb.authStore.record
-      return r ? mapMe(r) : null
+    async invite(email, role) {
+      const res = await fetch(`${baseUrl}/api/c11n/invite`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+        credentials: 'same-origin',
+        body: JSON.stringify({ email, role }),
+      })
+      const text = await res.text()
+      let body: { link?: string; expiresAt?: string; message?: string } = {}
+      try {
+        body = text ? (JSON.parse(text) as typeof body) : {}
+      } catch {
+        // A non-JSON body is an error page, not an invite.
+      }
+      if (!res.ok) {
+        const err = new Error(body.message || `Invite failed (${res.status})`) as Error & {
+          status?: number
+        }
+        err.status = res.status
+        throw err
+      }
+      if (!body.link) throw new Error('Invite returned no link')
+      return { link: body.link, expiresAt: body.expiresAt ?? '' }
     },
 
     async listComments(project, path) {

@@ -4,12 +4,12 @@ import {
   defaultProjectId,
   listComments,
   listReplies,
-  loginAs,
   readCreds,
   resetData,
   seedComment,
+  sessionCookie,
+  signInAs,
   superuserTokenFor,
-  userToken,
 } from '../fixtures'
 
 /**
@@ -23,18 +23,17 @@ import {
  * locators pierce it.
  */
 
-const PASSWORD = 'password123456'
-
 test.beforeEach(async () => {
   await resetData()
 })
 
-/** Sign in as a fresh user and land on `path` with the overlay ready. */
-async function signedIn(page: Page, email: string, name = 'Tester', path = '/'): Promise<void> {
-  await page.goto(path)
-  await page.evaluate(() => localStorage.clear())
-  await page.reload()
-  await loginAs(page, email, PASSWORD)
+/**
+ * Sign in the only way there is (magic link set by the proxy) and land on `/`
+ * with the overlay ready. `name` is ignored: it stays in the signature so the
+ * call sites read as "signed in as <name>".
+ */
+async function signedIn(page: Page, email: string, _name = 'Tester'): Promise<void> {
+  await signInAs(page, email)
 }
 
 /** Create a comment through the UI: pick the h1, type, Save. */
@@ -69,13 +68,15 @@ test.describe('B2 — comment creation', () => {
   // every time it runs.
   test('10 parallel creates get unique seqs 1..10', async ({ request }) => {
     const user = await createUser(undefined, 'B2 Parallel')
-    const token = await userToken(user.email)
+    // Through the proxy as the user: a cookie, because the gate overwrites any
+    // Authorization header on /__c11n/pb/* (3.8).
+    const cookie = await sessionCookie(user.email)
     const project = await defaultProjectId()
 
     const responses = await Promise.all(
       Array.from({ length: 10 }, (_, i) =>
         request.post('/__c11n/pb/api/collections/comments/records', {
-          headers: { authorization: token },
+          headers: { cookie },
           data: {
             project,
             path: '/',
@@ -97,11 +98,11 @@ test.describe('B2 — comment creation', () => {
 
   test('a client-supplied seq is ignored (hook owns it)', async ({ request }) => {
     const user = await createUser(undefined, 'B2 Client Seq')
-    const token = await userToken(user.email)
+    const cookie = await sessionCookie(user.email)
     const project = await defaultProjectId()
 
     const res = await request.post('/__c11n/pb/api/collections/comments/records', {
-      headers: { authorization: token },
+      headers: { cookie },
       data: { project, path: '/', selector: 'h1', body: 'sneaky', author: user.id, seq: 999 },
     })
     expect(res.status()).toBe(200)

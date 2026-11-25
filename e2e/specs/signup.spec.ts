@@ -1,5 +1,5 @@
 import { expect, test, type APIRequestContext } from '@playwright/test'
-import { createUser, readCreds, superuserTokenFor, userToken } from '../fixtures'
+import { createUser, readCreds, sessionCookie, superuserTokenFor } from '../fixtures'
 
 /**
  * S1 — the default `users` collection ships with `createRule: ""`, i.e. anyone
@@ -29,7 +29,7 @@ async function userCount(request: APIRequestContext): Promise<number> {
 }
 
 test.describe('S1 — public signup is closed', () => {
-  test('anonymous signup through the proxy is rejected', async ({ request }) => {
+  test('anonymous signup through the proxy never reaches PocketBase', async ({ request }) => {
     const before = await userCount(request)
     const res = await request.post('/__c11n/pb/api/collections/users/records', {
       data: {
@@ -38,19 +38,20 @@ test.describe('S1 — public signup is closed', () => {
         passwordConfirm: PASSWORD,
       },
     })
-    // `createRule: null` is superuser-only, and PocketBase answers 403 for it
-    // (not 400: the request is well formed, the caller is not allowed).
-    expect(res.status(), await res.text()).toBe(403)
+    // Since 3.8 the gate answers first for a request with no session (401, not
+    // the 403 `createRule: null` used to give): an anonymous caller cannot even
+    // reach the users collection.
+    expect(res.status(), await res.text()).toBe(401)
     expect(await userCount(request)).toBe(before)
   })
 
   test('an authenticated normal user cannot create users', async ({ request }) => {
     const user = await createUser(undefined, 'Signup Probe')
-    const token = await userToken(user.email)
+    const cookie = await sessionCookie(user.email)
     const before = await userCount(request)
 
     const res = await request.post('/__c11n/pb/api/collections/users/records', {
-      headers: { authorization: token },
+      headers: { cookie },
       data: {
         email: `probe-${Date.now()}@c11n.test`,
         password: PASSWORD,

@@ -2,19 +2,28 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { nextTick } from 'vue'
 import { mount, type VueWrapper } from '@vue/test-utils'
 import { createPinia, setActivePinia, type Pinia } from 'pinia'
+
+// The session store redirects on a 401; jsdom cannot navigate, so the redirect
+// is a mock. The no-cookie path is covered by session.spec.ts.
+vi.mock('../src/lib/signin', () => ({
+  signInUrl: (reason: string) => `/__c11n/auth/?reason=${reason}`,
+  goToSignIn: vi.fn(),
+}))
+
 import { setBackend } from '../src/lib/backend'
 import type { C11nBackend, Me } from '../src/lib/api'
 import { PROJECT } from '../src/lib/project'
 import { useCommentsStore } from '../src/stores/comments'
+import { useSessionStore } from '../src/stores/session'
 import App from '../src/App.vue'
 
-const tom: Me = { id: 'u1', email: 'tom@hfdf.io', name: 'Tom' }
+const tom: Me = { id: 'u1', email: 'tom@hfdf.io', name: 'Tom', role: 'team' }
 
 function makeMockBackend(overrides: Partial<C11nBackend> = {}): C11nBackend {
   return {
-    login: vi.fn().mockResolvedValue(tom),
-    logout: vi.fn(),
-    me: vi.fn().mockReturnValue(null),
+    me: vi.fn().mockResolvedValue(null),
+    logout: vi.fn().mockResolvedValue(undefined),
+    invite: vi.fn(),
     listComments: vi.fn().mockResolvedValue([]),
     createComment: vi.fn(),
     setResolved: vi.fn().mockResolvedValue(undefined),
@@ -46,45 +55,39 @@ describe('App.vue auth states', () => {
     return wrapper
   }
 
-  it('logged out: shows the sign-in chip, no login panel until clicked', async () => {
-    setBackend(makeMockBackend({ me: vi.fn().mockReturnValue(null) }))
+  it('signed out (no cookie): renders no overlay UI at all', async () => {
+    setBackend(makeMockBackend({ me: vi.fn().mockResolvedValue(null) }))
     const wrapper = mountApp()
+    await vi.waitFor(() => expect(useSessionStore().loading).toBe(false))
 
-    const chip = wrapper.find('.c11n-signin-chip')
-    expect(chip.exists()).toBe(true)
-    expect(chip.text()).toContain('Sign in to comment')
+    // No in-overlay sign-in chip or form: the gate already sent the browser to
+    // the sign-in page (task 3.8), so this bundle should not exist in that case.
+    expect(wrapper.find('.c11n-signin-chip').exists()).toBe(false)
     expect(wrapper.find('.c11n-login').exists()).toBe(false)
-
-    await chip.trigger('click')
-    expect(wrapper.find('.c11n-login').exists()).toBe(true)
-
-    await chip.trigger('click')
-    expect(wrapper.find('.c11n-login').exists()).toBe(false)
+    expect(wrapper.find('.c11n-toolbar').exists()).toBe(false)
   })
 
-  it('logged in (persisted session): shows toolbar pill with user name + sign out', async () => {
-    setBackend(makeMockBackend({ me: vi.fn().mockReturnValue(tom) }))
+  it('signed in: shows the toolbar with the user name + sign out', async () => {
+    setBackend(makeMockBackend({ me: vi.fn().mockResolvedValue(tom) }))
     const wrapper = mountApp()
-    await nextTick() // onMounted → session.init() re-render
+    await vi.waitFor(() => expect(wrapper.find('.c11n-toolbar').exists()).toBe(true))
 
     expect(wrapper.find('.c11n-signin-chip').exists()).toBe(false)
-    const toolbar = wrapper.find('.c11n-toolbar')
-    expect(toolbar.exists()).toBe(true)
-    expect(toolbar.text()).toContain('Tom')
+    expect(wrapper.find('.c11n-toolbar').text()).toContain('Tom')
     expect(wrapper.find('.c11n-signout').exists()).toBe(true)
   })
 
-  it('sign out returns to the logged-out chip', async () => {
-    const mock = makeMockBackend({ me: vi.fn().mockReturnValue(tom) })
+  it('sign out clears the cookie through the backend and drops the toolbar', async () => {
+    const mock = makeMockBackend({ me: vi.fn().mockResolvedValue(tom) })
     setBackend(mock)
     const wrapper = mountApp()
-    await nextTick() // onMounted → session.init() re-render
+    await vi.waitFor(() => expect(wrapper.find('.c11n-toolbar').exists()).toBe(true))
 
     await wrapper.find('.c11n-signout').trigger('click')
 
     expect(mock.logout).toHaveBeenCalled()
-    expect(wrapper.find('.c11n-signin-chip').exists()).toBe(true)
-    expect(wrapper.find('.c11n-signout').exists()).toBe(false)
+    await vi.waitFor(() => expect(wrapper.find('.c11n-toolbar').exists()).toBe(false))
+    expect(wrapper.find('.c11n-signin-chip').exists()).toBe(false)
   })
 })
 
@@ -105,10 +108,12 @@ describe('App.vue comment mode integration', () => {
   })
 
   async function mountAuthed(overrides: Partial<C11nBackend> = {}) {
-    const mock = makeMockBackend({ me: vi.fn().mockReturnValue(tom), ...overrides })
+    const mock = makeMockBackend({ me: vi.fn().mockResolvedValue(tom), ...overrides })
     setBackend(mock)
     wrapper = mount(App, { global: { plugins: [pinia] } })
-    await nextTick() // session.init() → authed render + watchers flush
+    // init() is async now: wait for the authed render before asserting.
+    await vi.waitFor(() => expect(wrapper!.find('.c11n-toolbar').exists()).toBe(true))
+    await nextTick()
     return { mock, wrapper }
   }
 

@@ -94,7 +94,7 @@
   opacity: 0.6;
 }
 
-.c11n-login-error {
+.c11n-invite-error {
   margin: 0;
   font-size: 12px;
   color: #c0392b;
@@ -509,4 +509,44 @@
    overlay-owned elements and acts as a documented hook. */
 .c11n-flash {
   transition: outline-color 0.2s ease-in-out;
+}
+
+/* ---- Invite section (sidebar, owner/team only) --------------------------- */
+.c11n-invite {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px 16px;
+  border-bottom: 1px solid #e6e6ee;
+  background: #fafafc;
+}
+
+.c11n-invite-title {
+  margin: 0;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: #6b6b80;
+}
+
+.c11n-invite-form,
+.c11n-invite-result {
+  display: flex;
+  gap: 6px;
+  align-items: stretch;
+}
+
+.c11n-invite-email,
+.c11n-invite-link {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.c11n-invite-link {
+  font-size: 12px;
+}
+
+.c11n-invite-role {
+  flex: 0 0 auto;
 }

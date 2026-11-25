@@ -2,6 +2,7 @@ import { expect, test } from '@playwright/test'
 import { execFileSync } from 'node:child_process'
 import fs from 'node:fs'
 import path from 'node:path'
+import { createUser, sessionCookie, signInAs } from '../fixtures'
 
 const repoRoot = path.resolve(__dirname, '../..')
 const overlayTag = '/__c11n/overlay.js'
@@ -17,7 +18,10 @@ function caddyBin(): string {
 
 test.describe('proxy contract', () => {
   test('injects the overlay into HTML only', async ({ request }) => {
-    const html = await request.get('/', { headers: { accept: 'text/html' } })
+    // Everything but the sign-in surface is gated (3.8), so even this proxy
+    // contract needs a session.
+    const cookie = await sessionCookie((await createUser()).email)
+    const html = await request.get('/', { headers: { accept: 'text/html', cookie } })
     expect(html.status()).toBe(200)
     const body = await html.text()
     expect(body).toContain(overlayTag)
@@ -31,19 +35,22 @@ test.describe('proxy contract', () => {
       .find((src) => !src.includes('/__c11n/'))
     expect(asset, 'the served HTML should reference an app script').toBeTruthy()
 
-    const js = await request.get(asset!, { headers: { accept: '*/*' } })
+    const js = await request.get(asset!, { headers: { accept: '*/*', cookie } })
     expect(js.status()).toBe(200)
     expect(js.headers()['content-type']).toContain('javascript')
     expect(await js.text()).not.toContain(overlayTag)
 
     // JSON from the proxied PocketBase, same-origin under /__c11n/pb.
-    const health = await request.get('/__c11n/pb/api/health', { headers: { accept: '*/*' } })
+    const health = await request.get('/__c11n/pb/api/health', {
+      headers: { accept: '*/*', cookie },
+    })
     expect(health.status()).toBe(200)
     expect(await health.text()).not.toContain(overlayTag)
   })
 
   test('proxies PocketBase health same-origin', async ({ request, baseURL }) => {
-    const res = await request.get('/__c11n/pb/api/health')
+    const cookie = await sessionCookie((await createUser()).email)
+    const res = await request.get('/__c11n/pb/api/health', { headers: { cookie } })
     expect(res.status()).toBe(200)
     expect(res.url().startsWith(baseURL!)).toBe(true)
     const body = (await res.json()) as { code?: number; message?: string }
@@ -51,9 +58,11 @@ test.describe('proxy contract', () => {
   })
 
   test('mounts the overlay in an open shadow root', async ({ page }) => {
-    await page.goto('/')
+    // Signed in by magic link: the overlay only mounts its toolbar for a real
+    // session, since there is no in-overlay sign-in any more (3.9).
+    await signInAs(page)
     await expect(page.locator('#c11n-root')).toBeAttached()
-    await expect(page.locator('.c11n-signin-chip')).toBeVisible()
+    await expect(page.locator('.c11n-toolbar')).toBeVisible()
     const mode = await page.evaluate(
       () => document.getElementById('c11n-root')?.shadowRoot?.mode ?? null,
     )

@@ -3,6 +3,7 @@ import { expect, test, type APIRequestContext } from '@playwright/test'
 import {
   bootstrapInviteLink,
   createUserWithRole,
+  directMagicUrl,
   inviteAs,
   invitesFor,
   isolatedRequest,
@@ -36,14 +37,10 @@ function sha256(value: string): string {
 }
 
 const MAGIC_PREFIX = 'http://127.0.0.1:18080/__c11n/auth/magic?t='
-/** The hook route behind Caddy's /__c11n/pb proxy (3.8 rewrites the public path). */
-const HOOK_MAGIC = 'http://127.0.0.1:18080/__c11n/pb/api/c11n/auth/magic'
 
-/** Turn a public magic link into the hook URL reachable today (no Caddy rewrite yet). */
-function hookUrl(link: string, next?: string): string {
-  const token = new URL(link).searchParams.get('t') ?? ''
-  const url = new URL(HOOK_MAGIC)
-  url.searchParams.set('t', token)
+/** Add `next` to a public magic link (the link already carries `t`). */
+function withNext(link: string, next?: string): string {
+  const url = new URL(link)
   if (next !== undefined) url.searchParams.set('next', next)
   return url.toString()
 }
@@ -248,7 +245,7 @@ test.describe('3.3 invite route (copy-link MVP)', () => {
     const badRole = await inviteAs(request, owner.token, inviteeEmail('badrole'), 'superuser')
     expect(badRole.status, badRole.text).toBe(400)
 
-    const noEmail = await request.post('/__c11n/pb/api/c11n/invite', {
+    const noEmail = await request.post(`${readCreds().pbUrl}/api/c11n/invite`, {
       headers: { authorization: owner.token },
       data: { role: 'client' },
     })
@@ -260,7 +257,7 @@ test.describe('3.4 magic-link callback', () => {
   test('the link signs you in once and sets an HttpOnly session cookie', async ({ request }) => {
     const invite = await freshInvite(request)
 
-    const opened = await openMagicLink(request, hookUrl(invite.link))
+    const opened = await openMagicLink(request, invite.link)
     expect(opened.status, opened.body).toBe(302)
     expect(opened.location).toBe('/')
 
@@ -280,7 +277,7 @@ test.describe('3.4 magic-link callback', () => {
     // own API answers for them (this is exactly what Caddy will forward).
     const token = sessionToken(setCookie)
     const user = await userByEmail(invite.email)
-    const me = await request.get(`/__c11n/pb/api/collections/users/records/${user!.id}`, {
+    const me = await request.get(`${readCreds().pbUrl}/api/collections/users/records/${user!.id}`, {
       headers: { authorization: token },
     })
     expect(me.status(), await me.text()).toBe(200)
@@ -300,7 +297,7 @@ test.describe('3.4 magic-link callback', () => {
     const rows = await invitesFor(invite.email)
     expect(rows[0].usedAt).not.toBe('')
 
-    const reused = await openMagicLink(request, hookUrl(invite.link))
+    const reused = await openMagicLink(request, invite.link)
     // 3.7: a dead link is no longer an inline error page. It is a redirect to
     // the static sign-in page with reason=invalid; the error class travels in
     // a header so a script (and the spec) can still tell it apart.
@@ -312,7 +309,7 @@ test.describe('3.4 magic-link callback', () => {
 
   test('five parallel uses of one link: exactly one signs in', async ({ request }) => {
     const invite = await freshInvite(request)
-    const url = hookUrl(invite.link)
+    const url = invite.link
 
     const results = await Promise.all(Array.from({ length: 5 }, () => openMagicLink(request, url)))
     expect(results.filter((r) => r.setCookie).length, 'exactly one winner').toBe(1)
@@ -330,7 +327,7 @@ test.describe('3.4 magic-link callback', () => {
     const invite = await freshInvite(request)
     await patchInvite(invite.inviteId, { expiresAt: '2020-01-01 00:00:00.000Z' })
 
-    const opened = await openMagicLink(request, hookUrl(invite.link))
+    const opened = await openMagicLink(request, invite.link)
     expect(opened.status).toBe(302)
     expect(opened.location).toBe('/__c11n/auth/?reason=invalid')
     expect(opened.setCookie).toBeUndefined()
@@ -343,7 +340,7 @@ test.describe('3.4 magic-link callback', () => {
   test('an unknown token redirects to sign-in with reason=invalid and says nothing else', async ({
     request,
   }) => {
-    const opened = await openMagicLink(request, `${HOOK_MAGIC}?t=${'A'.repeat(43)}`)
+    const opened = await openMagicLink(request, `${readCreds().pbUrl}/api/c11n/auth/magic?t=${'A'.repeat(43)}`)
     expect(opened.status).toBe(302)
     expect(opened.location).toBe('/__c11n/auth/?reason=invalid')
     expect(opened.setCookie).toBeUndefined()
@@ -365,7 +362,7 @@ test.describe('3.4 magic-link callback', () => {
     ]
     for (const [next, expected] of cases) {
       const invite = await freshInvite(request)
-      const opened = await openMagicLink(request, hookUrl(invite.link, next))
+      const opened = await openMagicLink(request, withNext(invite.link, next))
       expect(opened.status, `next=${next}: ${opened.body}`).toBe(302)
       expect(opened.location, `next=${next}`).toBe(expected)
     }
@@ -378,7 +375,9 @@ async function sessionFor(
   role: 'owner' | 'team' | 'client' | 'agent' = 'client',
 ): Promise<{ cookie: string; token: string; user: { id: string; email: string; name: string; role?: string } }> {
   const invite = await freshInvite(request, role)
-  const opened = await openMagicLink(request, hookUrl(invite.link))
+  // Direct on PocketBase's port: these are pod-internal routes since 3.8, and
+  // the Set-Cookie is the only thing a browser would keep from this exchange.
+  const opened = await openMagicLink(request, directMagicUrl(invite.link))
   expect(opened.status, opened.body).toBe(302)
   const token = sessionToken(opened.setCookie!)
   const user = (await userByEmail(invite.email))!
@@ -388,7 +387,7 @@ async function sessionFor(
 test.describe('3.6 session, me and logout', () => {
   test('a valid session is 200 with X-C11n-User and X-C11n-Role', async ({ request }) => {
     const { cookie, user } = await sessionFor(request, 'client')
-    const res = await request.get('/__c11n/pb/api/c11n/session', { headers: { cookie } })
+    const res = await request.get(`${readCreds().pbUrl}/api/c11n/session`, { headers: { cookie } })
     expect(res.status(), await res.text()).toBe(200)
     expect(res.headers()['x-c11n-user']).toBe(user.id)
     expect(res.headers()['x-c11n-role']).toBe('client')
@@ -396,13 +395,13 @@ test.describe('3.6 session, me and logout', () => {
 
   test('the role header follows the user, not the invite', async ({ request }) => {
     const { cookie, user } = await sessionFor(request, 'team')
-    const res = await request.get('/__c11n/pb/api/c11n/session', { headers: { cookie } })
+    const res = await request.get(`${readCreds().pbUrl}/api/c11n/session`, { headers: { cookie } })
     expect(res.headers()['x-c11n-role']).toBe('team')
     expect(res.headers()['x-c11n-user']).toBe(user.id)
   })
 
   test('no session: 302 to the sign-in page for HTML, 401 otherwise', async ({ request }) => {
-    const html = await request.get('/__c11n/pb/api/c11n/session', {
+    const html = await request.get(`${readCreds().pbUrl}/api/c11n/session`, {
       headers: { accept: 'text/html,application/xhtml+xml', 'x-forwarded-uri': '/some/page?x=1' },
       maxRedirects: 0,
     })
@@ -415,19 +414,19 @@ test.describe('3.6 session, me and logout', () => {
       '/some/page?x=1',
     )
 
-    const nonHtml = await request.get('/__c11n/pb/api/c11n/session', { headers: { accept: '*/*' }, maxRedirects: 0 })
+    const nonHtml = await request.get(`${readCreds().pbUrl}/api/c11n/session`, { headers: { accept: '*/*' }, maxRedirects: 0 })
     expect(nonHtml.status()).toBe(401)
   })
 
   test('a forged or malformed cookie is not a session', async ({ request }) => {
     for (const value of ['garbage', 'a.b.c', 'Bearer junk']) {
-      const html = await request.get('/__c11n/pb/api/c11n/session', {
+      const html = await request.get(`${readCreds().pbUrl}/api/c11n/session`, {
         headers: { accept: 'text/html', cookie: `c11n_session=${value}` },
         maxRedirects: 0,
       })
       expect(html.status(), value).toBe(302)
 
-      const json = await request.get('/__c11n/pb/api/c11n/session', {
+      const json = await request.get(`${readCreds().pbUrl}/api/c11n/session`, {
         headers: { accept: 'application/json', cookie: `c11n_session=${value}` },
         maxRedirects: 0,
       })
@@ -440,23 +439,27 @@ test.describe('3.6 session, me and logout', () => {
     // returns that record; the route must reject anything that is not a users
     // record, or the proxy gate would accept an admin token as a session.
     const su = await superuserTokenFor()
-    const res = await request.get('/__c11n/pb/api/c11n/session', {
+    const res = await request.get(`${readCreds().pbUrl}/api/c11n/session`, {
       headers: { accept: 'application/json', cookie: `c11n_session=${su}` },
       maxRedirects: 0,
     })
     expect(res.status()).toBe(401)
   })
 
-  test('a cookie for another origin does not leak into the URI-based redirect', async ({ request }) => {
-    // Without X-Forwarded-Uri (a direct call) the redirect falls back to the
-    // request's own URI, never to an attacker-supplied string.
-    const res = await request.get('/__c11n/pb/api/c11n/session?evil=1', {
+  test('a query parameter called next cannot steer the redirect', async ({ request }) => {
+    // The redirect's `next` is derived from the request URI, never from
+    // caller-supplied input: here the attacker's ?next= is just part of the
+    // path we remember, and the page ends up back on this same path.
+    const res = await request.get('/__c11n/pb/api/c11n/session?next=https://evil.example/steal', {
       headers: { accept: 'text/html' },
       maxRedirects: 0,
     })
     expect(res.status()).toBe(302)
     const location = res.headers()['location']
-    expect(decodeURIComponent(location.slice(location.indexOf('next=') + 5))).toBe('/api/c11n/session?evil=1')
+    const params = new URL(location, 'http://127.0.0.1:18080').searchParams
+    expect(params.get('reason')).toBe('expired')
+    expect(params.get('next')).toBe('/__c11n/pb/api/c11n/session?next=https://evil.example/steal')
+    expect(params.get('next')).not.toBe('https://evil.example/steal')
   })
 
   test('me answers from the bearer token and from the cookie', async ({ request }) => {
@@ -467,7 +470,7 @@ test.describe('3.6 session, me and logout', () => {
       { authorization: `Bearer ${token}` },
       { cookie },
     ] as Array<Record<string, string>>) {
-      const res = await request.get('/__c11n/pb/api/c11n/me', { headers })
+      const res = await request.get(`${readCreds().pbUrl}/api/c11n/me`, { headers })
       expect(res.status(), JSON.stringify(headers) + ' ' + (await res.text())).toBe(200)
       expect(await res.json()).toEqual({ id: user.id, email: user.email, name: user.name, role: 'client' })
     }
@@ -476,11 +479,11 @@ test.describe('3.6 session, me and logout', () => {
     // the shared `request` fixture still holds the session cookie set above.
     const anon = await isolatedRequest()
     try {
-      const anonymous = await anon.get('/__c11n/pb/api/c11n/me')
+      const anonymous = await anon.get(`${readCreds().pbUrl}/api/c11n/me`)
       expect(anonymous.status()).toBe(401)
 
       // A superuser is not a c11n user.
-      const asSuperuser = await anon.get('/__c11n/pb/api/c11n/me', {
+      const asSuperuser = await anon.get(`${readCreds().pbUrl}/api/c11n/me`, {
         headers: { authorization: await superuserTokenFor() },
       })
       expect(asSuperuser.status()).toBe(401)
@@ -491,7 +494,7 @@ test.describe('3.6 session, me and logout', () => {
 
   test('logout clears the cookie with Max-Age=0 and the same attributes', async ({ request }) => {
     const { cookie } = await sessionFor(request, 'client')
-    const res = await request.post('/__c11n/pb/api/c11n/auth/logout', { headers: { cookie } })
+    const res = await request.post(`${readCreds().pbUrl}/api/c11n/auth/logout`, { headers: { cookie } })
     expect(res.status(), await res.text()).toBe(204)
 
     const setCookie = res.headers()['set-cookie']

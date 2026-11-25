@@ -49,7 +49,7 @@ function rec(overrides: Partial<CommentRec> = {}): CommentRec {
 
 function makeMockBackend(): C11nBackend {
   return {
-    login: vi.fn(),
+    invite: vi.fn(),
     logout: vi.fn(),
     me: vi.fn().mockReturnValue(null),
     listComments: vi.fn().mockResolvedValue([]),

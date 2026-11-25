@@ -28,6 +28,26 @@
 }
 
 {$C11N_LISTEN::8080} {
+	# ---- the session gate (ADR 0006, task 3.8) -----------------------------
+	# Every route except the public identity surface asks the pod-internal
+	# session route first. 2xx passes (with the identity copied into
+	# X-C11n-User/X-C11n-Role); for an HTML navigation the hook's 302 to the
+	# sign-in page is relayed verbatim; everything else gets a 401.
+	#
+	# The admin UI is excluded here only so it can answer 404 without a
+	# session — it must never be reachable on the review host at all.
+	@gated not path /__c11n/auth/* /__c11n/pb/_/*
+	forward_auth @gated {$C11N_PB_ADDR:pocketbase:8090} {
+		uri /api/c11n/session
+		copy_headers X-C11n-User X-C11n-Role
+	}
+
+	# PocketBase's admin UI (_/) on the review host: 404, not a redirect and
+	# not a hint that a PocketBase lives here.
+	handle /__c11n/pb/_/* {
+		respond 404
+	}
+
 	# ---- public identity surface (ADR 0006) --------------------------------
 	# The only routes with no session gate in front of them (3.8): the sign-in
 	# page, and the two routes that create or clear the session cookie. Caddy
@@ -53,6 +73,11 @@
 	# PocketBase API + realtime, same-origin under /__c11n/pb/
 	handle_path /__c11n/pb/* {
 		reverse_proxy {$C11N_PB_ADDR:pocketbase:8090} {
+			# The overlay never holds a token: whatever the session cookie
+			# carries IS the Authorization for this prefix, and a client-sent
+			# header is overwritten (never forwarded) — a forged bearer must
+			# not outrank the cookie the gate just validated.
+			header_up Authorization {http.request.cookie.c11n_session}
 			# SSE: stream responses immediately
 			flush_interval -1
 		}

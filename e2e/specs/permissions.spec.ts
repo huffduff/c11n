@@ -8,8 +8,8 @@ import {
   resetData,
   seedComment,
   seedReply,
+  sessionCookie,
   superuserTokenFor,
-  userToken,
 } from '../fixtures'
 
 /**
@@ -32,11 +32,11 @@ async function patch(
   request: APIRequestContext,
   url: string,
   data: Record<string, unknown>,
-  token?: string,
+  cookie?: string,
 ): Promise<Awaited<ReturnType<APIRequestContext['patch']>>> {
   return request.patch(url, {
     data,
-    ...(token ? { headers: { authorization: token } } : {}),
+    ...(cookie ? { headers: { cookie } } : {}),
   })
 }
 
@@ -49,9 +49,9 @@ test.describe('S2 — immutable fields on comments', () => {
     const alice = await createUser(undefined, 'Alice')
     const bob = await createUser(undefined, 'Bob')
     const comment = await seedComment({ author: alice.id, body: 'alice thread' })
-    const bobToken = await userToken(bob.email)
+    const bobCookie = await sessionCookie(bob.email)
 
-    const res = await patch(request, `${PB}/api/collections/comments/records/${comment.id}`, { seq: 99 }, bobToken)
+    const res = await patch(request, `${PB}/api/collections/comments/records/${comment.id}`, { seq: 99 }, bobCookie)
     // 404, not 400: the non-author branch of `comments.updateRule` now requires
     // author/project/seq to be unset (1764000300), so the rule denies the PATCH
     // before the immutability hook is reached (the hook answers 400 for the
@@ -66,13 +66,13 @@ test.describe('S2 — immutable fields on comments', () => {
     const alice = await createUser(undefined, 'Alice')
     const bob = await createUser(undefined, 'Bob')
     const comment = await seedComment({ author: alice.id, body: 'alice thread' })
-    const aliceToken = await userToken(alice.email)
+    const aliceCookie = await sessionCookie(alice.email)
 
     const res = await patch(
       request,
       `${PB}/api/collections/comments/records/${comment.id}`,
       { author: bob.id },
-      aliceToken,
+      aliceCookie,
     )
     expect(res.status(), await res.text()).toBe(400)
     expect((await listComments()).find((c) => c.id === comment.id)?.author).toBe(alice.id)
@@ -81,7 +81,7 @@ test.describe('S2 — immutable fields on comments', () => {
   test('alice (author) cannot move the comment to another project', async ({ request }) => {
     const alice = await createUser(undefined, 'Alice')
     const comment = await seedComment({ author: alice.id, body: 'alice thread' })
-    const aliceToken = await userToken(alice.email)
+    const aliceCookie = await sessionCookie(alice.email)
 
     const other = (await createProject(`move-target-${Date.now()}`)).id
     try {
@@ -89,7 +89,7 @@ test.describe('S2 — immutable fields on comments', () => {
         request,
         `${PB}/api/collections/comments/records/${comment.id}`,
         { project: other },
-        aliceToken,
+        aliceCookie,
       )
       expect(res.status(), await res.text()).toBe(400)
       expect((await listComments()).find((c) => c.id === comment.id)?.project).toBe(comment.project)
@@ -101,13 +101,13 @@ test.describe('S2 — immutable fields on comments', () => {
   test('alice can still edit her own body', async ({ request }) => {
     const alice = await createUser(undefined, 'Alice')
     const comment = await seedComment({ author: alice.id, body: 'before' })
-    const aliceToken = await userToken(alice.email)
+    const aliceCookie = await sessionCookie(alice.email)
 
     const res = await patch(
       request,
       `${PB}/api/collections/comments/records/${comment.id}`,
       { body: 'after' },
-      aliceToken,
+      aliceCookie,
     )
     expect(res.status(), await res.text()).toBe(200)
     expect((await listComments()).find((c) => c.id === comment.id)?.body).toBe('after')
@@ -135,13 +135,13 @@ test.describe('S2 — immutable fields on comments', () => {
   test('the superuser bypass does not weaken the author path', async ({ request }) => {
     const alice = await createUser(undefined, 'Alice')
     const comment = await seedComment({ author: alice.id, body: 'author cannot renumber' })
-    const aliceToken = await userToken(alice.email)
+    const aliceCookie = await sessionCookie(alice.email)
 
     const res = await patch(
       request,
       `${PB}/api/collections/comments/records/${comment.id}`,
       { seq: (comment.seq ?? 0) + 1 },
-      aliceToken,
+      aliceCookie,
     )
     expect(res.status(), await res.text()).toBe(400)
     expect((await listComments()).find((c) => c.id === comment.id)?.seq).toBe(comment.seq)
@@ -150,7 +150,7 @@ test.describe('S2 — immutable fields on comments', () => {
   test('a resent unchanged seq is accepted (full-record PUTs stay legal)', async ({ request }) => {
     const alice = await createUser(undefined, 'Alice')
     const comment = await seedComment({ author: alice.id, body: 'unchanged seq' })
-    const aliceToken = await userToken(alice.email)
+    const aliceCookie = await sessionCookie(alice.email)
 
     // The overlay sends only changed fields, but a form/script may echo the
     // whole record back; that must not be rejected as "changed".
@@ -158,7 +158,7 @@ test.describe('S2 — immutable fields on comments', () => {
       request,
       `${PB}/api/collections/comments/records/${comment.id}`,
       { seq: comment.seq, author: alice.id, body: 'edited with echo' },
-      aliceToken,
+      aliceCookie,
     )
     expect(res.status(), await res.text()).toBe(200)
     expect((await listComments()).find((c) => c.id === comment.id)?.body).toBe('edited with echo')
@@ -170,9 +170,9 @@ test.describe('comments — rule still separates authors from resolvers', () => 
     const alice = await createUser(undefined, 'Alice')
     const bob = await createUser(undefined, 'Bob')
     const comment = await seedComment({ author: alice.id, body: 'do not touch' })
-    const bobToken = await userToken(bob.email)
+    const bobCookie = await sessionCookie(bob.email)
 
-    const res = await patch(request, `${PB}/api/collections/comments/records/${comment.id}`, { body: 'hacked' }, bobToken)
+    const res = await patch(request, `${PB}/api/collections/comments/records/${comment.id}`, { body: 'hacked' }, bobCookie)
     expect([403, 404]).toContain(res.status())
     expect((await listComments()).find((c) => c.id === comment.id)?.body).toBe('do not touch')
   })
@@ -181,9 +181,9 @@ test.describe('comments — rule still separates authors from resolvers', () => 
     const alice = await createUser(undefined, 'Alice')
     const bob = await createUser(undefined, 'Bob')
     const comment = await seedComment({ author: alice.id, body: 'resolve me' })
-    const bobToken = await userToken(bob.email)
+    const bobCookie = await sessionCookie(bob.email)
 
-    const res = await patch(request, `${PB}/api/collections/comments/records/${comment.id}`, { resolved: true }, bobToken)
+    const res = await patch(request, `${PB}/api/collections/comments/records/${comment.id}`, { resolved: true }, bobCookie)
     expect(res.status(), await res.text()).toBe(200)
     expect((await listComments()).find((c) => c.id === comment.id)?.resolved).toBe(true)
   })
@@ -195,13 +195,13 @@ test.describe('S2 — immutable fields on replies', () => {
     const first = await seedComment({ author: alice.id, body: 'first' })
     const second = await seedComment({ author: alice.id, body: 'second' })
     const reply = await seedReply(first.id, alice.id, 'reply body')
-    const aliceToken = await userToken(alice.email)
+    const aliceCookie = await sessionCookie(alice.email)
 
     const res = await patch(
       request,
       `${PB}/api/collections/replies/records/${reply.id}`,
       { comment: second.id },
-      aliceToken,
+      aliceCookie,
     )
     expect(res.status(), await res.text()).toBe(400)
 
@@ -216,13 +216,13 @@ test.describe('S2 — immutable fields on replies', () => {
     const alice = await createUser(undefined, 'Alice')
     const comment = await seedComment({ author: alice.id, body: 'thread' })
     const reply = await seedReply(comment.id, alice.id, 'before')
-    const aliceToken = await userToken(alice.email)
+    const aliceCookie = await sessionCookie(alice.email)
 
     const res = await patch(
       request,
       `${PB}/api/collections/replies/records/${reply.id}`,
       { body: 'after' },
-      aliceToken,
+      aliceCookie,
     )
     expect(res.status(), await res.text()).toBe(200)
   })

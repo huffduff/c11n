@@ -426,7 +426,10 @@ cmd_up() {
 			--config "$REPO_ROOT/deploy/Caddyfile" \
 			--adapter caddyfile
 	)
-	wait_for caddy "http://127.0.0.1:$CADDY_PORT/__c11n/pb/api/health"
+	# The sign-in page, not /__c11n/pb/api/health: everything but
+	# /__c11n/auth/* is behind the session gate (3.8), so a health check there
+	# would (correctly) answer 401 and this would never come up.
+	wait_for caddy "http://127.0.0.1:$CADDY_PORT/__c11n/auth/"
 
 	log "caddy:      http://127.0.0.1:$CADDY_PORT (overlay + proxied PocketBase)"
 	log "pocketbase: http://127.0.0.1:$PB_PORT (admin: /_/)"

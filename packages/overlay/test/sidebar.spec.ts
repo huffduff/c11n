@@ -2,9 +2,10 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { mount, type VueWrapper } from '@vue/test-utils'
 import { createPinia, setActivePinia, type Pinia } from 'pinia'
 import { setBackend } from '../src/lib/backend'
-import type { C11nBackend, CommentRec } from '../src/lib/api'
+import type { C11nBackend, CommentRec, Role } from '../src/lib/api'
 import { PROJECT } from '../src/lib/project'
 import { useCommentsStore } from '../src/stores/comments'
+import { useSessionStore } from '../src/stores/session'
 import Sidebar from '../src/components/Sidebar.vue'
 
 function rec(overrides: Partial<CommentRec> = {}): CommentRec {
@@ -26,7 +27,7 @@ function rec(overrides: Partial<CommentRec> = {}): CommentRec {
 
 function makeMockBackend(overrides: Partial<C11nBackend> = {}): C11nBackend {
   return {
-    login: vi.fn(),
+    invite: vi.fn(),
     logout: vi.fn(),
     me: vi.fn().mockReturnValue(null),
     listComments: vi.fn().mockResolvedValue([]),
@@ -193,5 +194,93 @@ describe('Sidebar.vue', () => {
     const { store, wrapper } = mountSidebar([])
     await wrapper.find('.c11n-sidebar-close').trigger('click')
     expect(store.sidebarOpen).toBe(false)
+  })
+})
+
+/**
+ * Invite section (task 3.9). The role matrix is ADR 0008's: team invites
+ * clients only, owner invites team/client/owner, nobody invites agents by
+ * hand. The server enforces it too; this is about not offering the request.
+ */
+describe('Sidebar.vue invite', () => {
+  let pinia: Pinia
+  let wrapper: VueWrapper | null = null
+
+  beforeEach(() => {
+    setActivePinia((pinia = createPinia()))
+  })
+
+  afterEach(() => {
+    wrapper?.unmount()
+    wrapper = null
+    vi.unstubAllGlobals()
+  })
+
+  function mountAs(role: Role, overrides: Partial<C11nBackend> = {}) {
+    const mock = makeMockBackend(overrides)
+    setBackend(mock)
+    useSessionStore().me = { id: 'u1', email: 'inviter@example.com', name: 'Inviter', role }
+    wrapper = mount(Sidebar, { global: { plugins: [pinia] } })
+    return { mock, wrapper }
+  }
+
+  function optionTexts(w: VueWrapper): string[] {
+    return w.findAll('.c11n-invite-role option').map((o) => o.text())
+  }
+
+  it('a team user sees Invite and can only pick client', () => {
+    const { wrapper } = mountAs('team')
+    expect(wrapper.find('.c11n-invite').exists()).toBe(true)
+    expect(optionTexts(wrapper)).toEqual(['client'])
+  })
+
+  it('an owner may invite team, client and owner — never agent', () => {
+    const { wrapper } = mountAs('owner')
+    expect(optionTexts(wrapper)).toEqual(['team', 'client', 'owner'])
+    expect(optionTexts(wrapper)).not.toContain('agent')
+  })
+
+  it('a client user sees no Invite section', () => {
+    const { wrapper } = mountAs('client')
+    expect(wrapper.find('.c11n-invite').exists()).toBe(false)
+  })
+
+  it('an agent sees no Invite section either', () => {
+    const { wrapper } = mountAs('agent')
+    expect(wrapper.find('.c11n-invite').exists()).toBe(false)
+  })
+
+  it('creating an invite shows the returned link; Copy copies it', async () => {
+    const link = 'http://127.0.0.1:18080/__c11n/auth/magic?t=abc'
+    const { mock, wrapper } = mountAs('team', {
+      invite: vi.fn().mockResolvedValue({ link, expiresAt: '2026-11-28T00:00:00.000Z' }),
+    })
+    const writeText = vi.fn().mockResolvedValue(undefined)
+    Object.defineProperty(navigator, 'clipboard', { value: { writeText }, configurable: true })
+
+    await wrapper.find('.c11n-invite-email').setValue('client@example.com')
+    await wrapper.find('.c11n-invite-form').trigger('submit')
+
+    await vi.waitFor(() => expect(wrapper.find('.c11n-invite-link').exists()).toBe(true))
+    expect(mock.invite).toHaveBeenCalledWith('client@example.com', 'client')
+    expect((wrapper.find('.c11n-invite-link').element as HTMLInputElement).value).toBe(link)
+
+    const copy = wrapper.find('.c11n-invite-copy')
+    expect(copy.text()).toBe('Copy')
+    await copy.trigger('click')
+    expect(writeText).toHaveBeenCalledWith(link)
+    await vi.waitFor(() => expect(wrapper.find('.c11n-invite-copy').text()).toBe('Copied'))
+  })
+
+  it('shows the server message when the invite is refused', async () => {
+    const err = Object.assign(new Error('team members can only invite clients'), { status: 403 })
+    const { wrapper } = mountAs('team', { invite: vi.fn().mockRejectedValue(err) })
+
+    await wrapper.find('.c11n-invite-email').setValue('boss@example.com')
+    await wrapper.find('.c11n-invite-form').trigger('submit')
+
+    await vi.waitFor(() => expect(wrapper.find('.c11n-invite-error').exists()).toBe(true))
+    expect(wrapper.find('.c11n-invite-error').text()).toContain('cannot invite that user')
+    expect(wrapper.find('.c11n-invite-link').exists()).toBe(false)
   })
 })

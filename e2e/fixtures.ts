@@ -23,12 +23,14 @@ export interface Creds {
  */
 export const GO_PORT = 15174
 
+export type Role = 'owner' | 'team' | 'client' | 'agent'
+
 export interface PbUser {
   id: string
   email: string
   name: string
   /** Set by the server: 'client' by default (pb_hooks/identity.pb.js). */
-  role?: string
+  role?: Role
 }
 
 export interface PbComment {
@@ -133,6 +135,7 @@ let userSeq = 0
 export async function createUser(
   email?: string,
   name = 'Test User',
+  role: Role = 'client',
   password = 'password123456',
 ): Promise<PbUser> {
   const creds = readCreds()
@@ -140,38 +143,40 @@ export async function createUser(
   const unique = email ?? `e2e-${Date.now()}-${userSeq++}@c11n.test`
   const res = await (await ctx()).post(`${creds.pbUrl}/api/collections/users/records`, {
     headers: { authorization: await superuserTokenFor() },
-    data: { email: unique, password, passwordConfirm: password, name },
+    data: { email: unique, password, passwordConfirm: password, name, role },
   })
   return json<PbUser>(res)
 }
 
-/** Password-auth a user against PocketBase directly, for API-driven specs. */
-export async function userToken(email: string, password = 'password123456'): Promise<string> {
+/**
+ * A bearer token for an API-level spec, minted through the superuser
+ * impersonate endpoint. Password auth is gone (task 3.9) and the gate
+ * overwrites any client Authorization on the proxy, so fixtures use
+ * impersonation for "act as this user" and talk to PocketBase directly
+ * (ADR 0006 mints agent tokens the same way).
+ */
+export async function userToken(email: string, durationSeconds = 3600): Promise<string> {
   const creds = readCreds()
-  const res = await (await ctx()).post(`${creds.pbUrl}/api/collections/users/auth-with-password`, {
-    data: { identity: email, password },
-  })
+  const user = await userByEmail(email)
+  if (!user) throw new Error(`userToken: no user with email ${email}`)
+  const res = await (await ctx()).post(
+    `${creds.pbUrl}/api/collections/users/impersonate/${user.id}`,
+    { headers: { authorization: await superuserTokenFor() }, data: { duration: durationSeconds } },
+  )
   const body = await json<{ token: string }>(res)
   return body.token
 }
 
 /**
  * Create a user with a specific role, as superuser, and return it with a
- * bearer token. The token comes from password auth, which still works until
- * task 3.9 — the invite route accepts it exactly like the session cookie it
- * will later be derived from.
+ * bearer token (impersonation, so it works with password auth off).
  */
 export async function createUserWithRole(
-  role: 'owner' | 'team' | 'client' | 'agent',
+  role: Role,
   name = `${role} user`,
 ): Promise<PbUser & { token: string }> {
-  const creds = readCreds()
   const email = `e2e-${role}-${Date.now()}-${userSeq++}@c11n.test`
-  const res = await (await ctx()).post(`${creds.pbUrl}/api/collections/users/records`, {
-    headers: { authorization: await superuserTokenFor() },
-    data: { email, password: 'password123456', passwordConfirm: 'password123456', name, role },
-  })
-  const user = await json<PbUser>(res)
+  const user = await createUser(email, name, role)
   return { ...user, token: await userToken(email) }
 }
 
@@ -184,8 +189,11 @@ export interface InviteResult {
 }
 
 /**
- * POST /api/c11n/invite through the proxy. `token` null means "call as
- * superuser" (the only caller allowed to do anything at all, per ADR 0008).
+ * POST /api/c11n/invite, straight to PocketBase on its own port. `token` null
+ * means "call as superuser" (the only caller allowed to do anything at all,
+ * per ADR 0008). Not through the proxy: since 3.8 the proxy overwrites any
+ * client Authorization with the session cookie, so a bearer through it would
+ * be signed as the cookie user (or 401 with no cookie at all).
  */
 export async function inviteAs(
   request: APIRequestContext,
@@ -194,7 +202,7 @@ export async function inviteAs(
   role: string,
 ): Promise<InviteResult> {
   const headers: Record<string, string> = token ? { authorization: token } : { authorization: await superuserTokenFor() }
-  const res = await request.post('/__c11n/pb/api/c11n/invite', { headers, data: { email, role } })
+  const res = await request.post(`${readCreds().pbUrl}/api/c11n/invite`, { headers, data: { email, role } })
   const text = await res.text()
   let body: { link?: string; expiresAt?: string } = {}
   try {
@@ -361,24 +369,57 @@ export async function deleteProject(id: string): Promise<void> {
   })
 }
 
-/**
- * Sign in through the overlay's own UI: chip → email/password → submit, then
- * wait for the authed toolbar. Deliberately drives the real form (not
- * localStorage injection) so the login path itself is covered.
- */
-export async function loginAs(page: Page, email: string, password = 'password123456'): Promise<void> {
-  await page.locator('.c11n-signin-chip').click()
-  await page.locator('input[type=email]').fill(email)
-  await page.locator('input[type=password]').fill(password)
-  await page.locator('form button[type=submit]').click()
-  await page.locator('.c11n-toolbar .c11n-mode-toggle').waitFor({ state: 'visible' })
+/** Turn a public magic link into the hook URL on PocketBase's own port. */
+export function directMagicUrl(link: string): string {
+  const token = new URL(link).searchParams.get('t') ?? ''
+  return `${readCreds().pbUrl}/api/c11n/auth/magic?t=${token}`
 }
 
-/** Fresh page state per test: no persisted PocketBase auth in localStorage. */
-export async function freshPage(page: Page, url = '/'): Promise<void> {
-  await page.goto(url)
-  await page.evaluate(() => localStorage.clear())
-  await page.reload()
+/** Mint a fresh (single-use) magic link for an existing or new user. */
+export async function magicLinkFor(email: string, role: Role = 'client'): Promise<string> {
+  const res = await inviteAs(await ctx(), null, email, role)
+  if (res.status !== 200 || !res.link) {
+    throw new Error(`magicLinkFor(${email}) -> ${res.status} ${res.text}`)
+  }
+  return res.link
+}
+
+/**
+ * A `c11n_session=…` Cookie header: the state a browser is in after opening a
+ * magic link. API-level specs pass it to the proxy instead of a bearer, because
+ * since 3.8 the proxy derives Authorization from this cookie and overwrites
+ * anything the client sent.
+ */
+export async function sessionCookie(email: string, role: Role = 'client'): Promise<string> {
+  const opened = await openMagicLink(await ctx(), directMagicUrl(await magicLinkFor(email, role)))
+  if (opened.status !== 302 || !opened.setCookie) {
+    throw new Error(`sessionCookie(${email}) -> ${opened.status} ${opened.body}`)
+  }
+  return `c11n_session=${sessionToken(opened.setCookie)}`
+}
+
+export interface SignedIn {
+  user: PbUser
+  link: string
+}
+
+/**
+ * Sign a browser in the way a reviewer does: mint a magic link as superuser and
+ * open it through the proxy. The link is public, sets the cookie and 302s to
+ * `/`.
+ *
+ * `email` omitted creates a fresh user with `role`. The wait is the authed
+ * toolbar: the overlay only renders it once `/api/c11n/me` answered from the
+ * cookie, so a green wait also proves the cookie got through the proxy.
+ */
+export async function signInAs(page: Page, email?: string, role: Role = 'client'): Promise<SignedIn> {
+  const user = email
+    ? ((await userByEmail(email)) ?? (await createUser(email, `${role} user`, role)))
+    : await createUser(undefined, `${role} user`, role)
+  const link = await magicLinkFor(user.email, (user.role as Role) ?? role)
+  await page.goto(link)
+  await page.locator('.c11n-toolbar .c11n-mode-toggle').waitFor({ state: 'visible' })
+  return { user, link }
 }
 
 export interface MagicOpen {

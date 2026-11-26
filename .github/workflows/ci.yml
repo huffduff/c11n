@@ -135,6 +135,13 @@ jobs:
       - name: Migrations up/down on a DB with data
         run: node scripts/check-migrations.mjs
 
+      # Load-time env validation: an out-of-range or non-integer
+      # C11N_SESSION_TTL_DAYS / C11N_LINK_TTL_HOURS falls back to its default
+      # and warns on stdout instead of failing every request later. No stack and
+      # no browser, so it sits with the other scratch checks.
+      - name: Env validation
+        run: node scripts/check-env-validation.mjs
+
       - name: Install dependencies
         run: npm ci
 

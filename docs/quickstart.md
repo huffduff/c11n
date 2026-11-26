@@ -127,7 +127,7 @@ The admin UI is deliberately **not** reachable through the review host:
 
 - **compose (dev):** `http://localhost:8090/_/`
 - **Kubernetes:** port-forward it, e.g.
-  `kubectl -n <ns> port-forward deploy/c11n 8090:8090`, then open
+  `kubectl -n <ns> port-forward svc/c11n-pocketbase 8090:8090`, then open
   `http://localhost:8090/_/`
 
 It is a break-glass tool (superusers, backups), not part of the reviewer flow:

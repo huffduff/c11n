@@ -10,7 +10,14 @@
 #        c11n-demo         from examples/demo-go-server/Dockerfile (test upstream)
 #   2. applies the demo upstream (Deployment + Service "demo")
 #   3. helm upgrade --install the chart against it, plain http behind Traefik
-#   4. prints the owner sign-in link from the pocketbase container log
+#   4. waits for both workloads (caddy Deployment, pocketbase StatefulSet)
+#   5. prints the owner sign-in link from the pocketbase pod's log
+#
+# TWO WORKLOADS (ADR 0005, revised 2026-11-26): <fullname>-caddy (Deployment)
+# and <fullname>-pocketbase (StatefulSet, one pod). The chart's NetworkPolicy is
+# ON by default and k3s enforces it; the ingress namespace is kube-system, which
+# is where Traefik runs on k3s. If you move the controller, either set
+# NETWORK_POLICY=0 or the review URL 504s with both pods Ready.
 #
 # IMAGES ARE PINNED BY DIGEST when `closedcloud build` returns one, and the tag
 # carries an epoch otherwise: a bare short sha is a moving tag, so a rebuild of
@@ -42,6 +49,9 @@
 #   ADMIN_INGRESS=1 publishes the PocketBase admin UI on ADMIN_HOST. OFF by
 #     default: the runbook's port-forward is the supported way in, and this
 #     hostname has no TLS and no gate in front of it.
+#   NETWORK_POLICY=0 disables the chart's NetworkPolicy (default: 1, on). Use it
+#     only to prove a suspected policy problem (a 504 with both pods Ready), or
+#     if `kubectl port-forward` turns out to be filtered by this cluster's CNI.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -56,6 +66,14 @@ UPSTREAM_URL="${UPSTREAM_URL:-http://demo:15174}"
 DRY_RUN="${DRY_RUN:-0}"
 SKIP_BUILD="${SKIP_BUILD:-0}"
 ADMIN_INGRESS="${ADMIN_INGRESS:-0}"
+NETWORK_POLICY="${NETWORK_POLICY:-1}"
+# Helm's fullname: the release name when it already contains the chart name,
+# <release>-c11n otherwise. Both workloads are named from it, so the log and
+# rollout commands below cannot guess wrong for a RELEASE= override.
+case "$RELEASE" in
+	*c11n*) FULLNAME="$RELEASE" ;;
+	*) FULLNAME="$RELEASE-c11n" ;;
+esac
 # A bare short sha is a MOVING tag for the same commit: rebuild the commit and
 # the cluster keeps the old image under IfNotPresent. The epoch makes every
 # build's tag unique, so a rebuild always deploys what was just built. (The
@@ -215,6 +233,14 @@ if [ "$ADMIN_INGRESS" = 1 ]; then
 	ADMIN_ARGS+=(--set "adminIngress.enabled=true" --set "adminIngress.host=$ADMIN_HOST")
 fi
 
+# The NetworkPolicy is on by default and k3s enforces it (Traefik is in
+# kube-system, which is the chart's default ingressNamespace). The escape hatch
+# exists so a 504 from Traefik can be attributed to the policy in one command.
+NETPOL_ARGS=()
+if [ "$NETWORK_POLICY" != 1 ]; then
+	NETPOL_ARGS+=(--set "networkPolicy.enabled=false")
+fi
+
 run helm upgrade --install "$RELEASE" "$REPO_ROOT/deploy/helm/c11n" \
 	--namespace "$NAMESPACE" --create-namespace \
 	--wait --timeout 10m \
@@ -230,6 +256,7 @@ run helm upgrade --install "$RELEASE" "$REPO_ROOT/deploy/helm/c11n" \
 	--set "persistence.size=1Gi" \
 	"${IMAGE_ARGS[@]}" \
 	"${ADMIN_ARGS[@]}" \
+	"${NETPOL_ARGS[@]}" \
 	--set "resources.caddy.requests.cpu=10m" \
 	--set "resources.caddy.requests.memory=32Mi" \
 	--set "resources.caddy.limits.memory=128Mi" \
@@ -237,14 +264,26 @@ run helm upgrade --install "$RELEASE" "$REPO_ROOT/deploy/helm/c11n" \
 	--set "resources.pocketbase.requests.memory=96Mi" \
 	--set "resources.pocketbase.limits.memory=256Mi"
 
-# ---- 4. the owner link -----------------------------------------------------
-# The bootstrap runs on PocketBase's first HTTP request (a probe triggers it),
-# so by the time --wait returns the line is usually there. Give it a few
-# seconds, because the log line is written by that first request, not at boot.
+# ---- 4. wait for both workloads --------------------------------------------
+# `helm --wait` already blocked until every Deployment and StatefulSet reports
+# ready, but it reports "timed out waiting for the condition" without saying
+# which one. These are idempotent, print the actual rollouts, and are what to
+# look at first when the install took a long time.
+run kubectl rollout status "deploy/$FULLNAME-caddy" -n "$NAMESPACE" --timeout=180s
+run kubectl rollout status "statefulset/$FULLNAME-pocketbase" -n "$NAMESPACE" --timeout=300s
+
+# ---- 5. the owner link -----------------------------------------------------
+# The bootstrap runs on PocketBase's first HTTP request (its own readiness
+# probe triggers it, and caddy's forward_auth does too), so by the time --wait
+# returns the line is usually there. Give it a few seconds, because the log line
+# is written by that first request, not at boot.
+#
+# statefulset/<name> logs the (only) pod; -c pocketbase because the pod name is
+# the reliable selector and the container name is the documented one.
 owner_link() {
 	local i out
 	for i in $(seq 1 30); do
-		out="$(kubectl logs "deploy/$RELEASE" -n "$NAMESPACE" -c pocketbase 2>/dev/null | grep -m1 'c11n bootstrap: owner invite' || true)"
+		out="$(kubectl logs "statefulset/$FULLNAME-pocketbase" -n "$NAMESPACE" -c pocketbase 2>/dev/null | grep -m1 'c11n bootstrap: owner invite' || true)"
 		if [ -n "$out" ]; then
 			printf '%s\n' "$out"
 			return 0
@@ -258,7 +297,10 @@ printf '\n'
 if [ "$DRY_RUN" = 1 ]; then
 	printf 'DRY RUN: nothing was built or installed. Re-run without DRY_RUN=1.\n'
 	printf '\nOn the cluster the owner link is:\n'
-	printf "  kubectl logs deploy/%s -n %s -c pocketbase | grep 'c11n bootstrap'\n" "$RELEASE" "$NAMESPACE"
+	printf "  kubectl logs statefulset/%s-pocketbase -n %s -c pocketbase | grep 'c11n bootstrap'\n" "$FULLNAME" "$NAMESPACE"
+	printf '\nAnd the two port-forwards (different objects, so two commands):\n'
+	printf "  kubectl port-forward deploy/%s-caddy -n %s 18080:8080\n" "$FULLNAME" "$NAMESPACE"
+	printf "  kubectl port-forward svc/%s-pocketbase -n %s 18090:8090\n" "$FULLNAME" "$NAMESPACE"
 	exit 0
 fi
 
@@ -269,13 +311,15 @@ if [ "$ADMIN_INGRESS" = 1 ]; then
 else
 	printf '  admin UI:    not published (ADMIN_INGRESS=0); use the port-forward below\n'
 fi
-printf '  port-forward: kubectl port-forward deploy/%s -n %s 18080:8080 18090:8090\n' "$RELEASE" "$NAMESPACE"
+printf '  port-forward (review):     kubectl port-forward deploy/%s-caddy -n %s 18080:8080\n' "$FULLNAME" "$NAMESPACE"
+printf '  port-forward (pocketbase): kubectl port-forward svc/%s-pocketbase -n %s 18090:8090\n' "$FULLNAME" "$NAMESPACE"
+printf '  network policy: %s (ingressNamespace=kube-system)\n' "$([ "$NETWORK_POLICY" = 1 ] && printf 'ON (default)' || printf 'OFF (NETWORK_POLICY=0)')"
 printf '\n'
 if link_line="$(owner_link)"; then
 	printf 'OWNER SIGN-IN LINK (single use, copy it now):\n'
 	printf '  %s\n' "${link_line##*: }"
 else
 	printf 'No bootstrap line yet. Get it with:\n'
-	printf "  kubectl logs deploy/%s -n %s -c pocketbase | grep 'c11n bootstrap'\n" "$RELEASE" "$NAMESPACE"
+	printf "  kubectl logs statefulset/%s-pocketbase -n %s -c pocketbase | grep 'c11n bootstrap'\n" "$FULLNAME" "$NAMESPACE"
 fi
 printf '\nNext: scripts/cluster/e2e-against-ingress.md (run the Playwright suite against this install).\n'

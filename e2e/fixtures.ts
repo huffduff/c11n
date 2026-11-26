@@ -83,7 +83,7 @@ export function stackLog(name: 'pocketbase' | 'caddy' | 'demo'): string {
   if (EXTERNAL) {
     throw new Error(
       `stackLog(${name}) is local-stack only. In external mode read the pod log: ` +
-        `kubectl logs deploy/c11n -c pocketbase`,
+        `kubectl logs statefulset/c11n-pocketbase -c pocketbase`,
     )
   }
   try {
@@ -110,7 +110,7 @@ export function bootstrapInviteLink(): BootstrapInvite {
   if (EXTERNAL) {
     throw new Error(
       'the bootstrap link lives in the cluster log, not here: ' +
-        "kubectl logs deploy/c11n -c pocketbase | grep 'c11n bootstrap' (docs/runbook.md)",
+        "kubectl logs statefulset/c11n-pocketbase -c pocketbase | grep 'c11n bootstrap' (docs/runbook.md)",
     )
   }
   const match = stackLog('pocketbase').match(

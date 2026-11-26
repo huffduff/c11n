@@ -5,21 +5,25 @@ c11n is up for {{ .Values.host }}.
   owner:      {{ .Values.owner.email }}
 
 {{ if eq .Values.tls.mode "none" -}}
-TLS: terminated in front of the cluster (tls.mode=none). The pod speaks http.
+TLS: terminated in front of the cluster (tls.mode=none). caddy speaks http.
 {{- else if eq .Values.tls.mode "existingSecret" -}}
 TLS: from the existing Secret {{ include "c11n.tlsSecretName" . }}.
 {{- else -}}
 TLS: cert-manager ({{ .Values.tls.issuer }}) -> Secret {{ include "c11n.tlsSecretName" . }}.
 {{- end }}
 
+Two workloads: Deployment {{ include "c11n.fullname" . }}-caddy (the proxy) and
+StatefulSet {{ include "c11n.fullname" . }}-pocketbase (the database, one pod).
+
 1. THE OWNER SIGN-IN LINK
-   The first owner is created on PocketBase's FIRST HTTP REQUEST (the readiness
-   probe triggers it), and the one-time link is printed to the pocketbase
-   container's stdout. It is in no other place - copy it now:
+   The first owner is created on PocketBase's FIRST HTTP REQUEST (its own
+   readiness probe triggers it), and the one-time link is printed to the
+   pocketbase container's stdout. It is in no other place - copy it now:
 
-     kubectl logs deploy/{{ include "c11n.fullname" . }} -c pocketbase | grep 'c11n bootstrap'
+     kubectl logs statefulset/{{ include "c11n.fullname" . }}-pocketbase -c pocketbase | grep 'c11n bootstrap'
 
-   If the pod has already restarted, use --previous. The link is single use and
+   The pod is {{ include "c11n.fullname" . }}-pocketbase-0 if you prefer to name
+   it. If it has already restarted, use --previous. The link is single use and
    expires after {{ .Values.invite.ttlHours }}h; if it is lost, mint another
    from an owner session (Invite in the overlay) - there is no email channel.
 
@@ -28,10 +32,14 @@ TLS: cert-manager ({{ .Values.tls.issuer }}) -> Secret {{ include "c11n.tlsSecre
    overlay's sidebar by an owner or team member.
 
 3. POCKETBASE ADMIN UI (superuser)
-   Not on {{ .Values.host }} (Caddy answers 404). Port-forward the pod:
+   Not on {{ .Values.host }} (Caddy answers 404). Port-forward the Service:
 
-     kubectl port-forward deploy/{{ include "c11n.fullname" . }} 8090:8090
+     kubectl port-forward svc/{{ include "c11n.fullname" . }}-pocketbase 8090:8090
      # then http://127.0.0.1:8090/_/
+
+   A Service port-forward reaches the (single) pocketbase pod whatever it is
+   called. If your CNI filters port-forward traffic under the chart's
+   NetworkPolicy - unusual, but CNI-dependent - see docs/runbook.md section 9.
 
 {{ if .Values.backup.cron -}}
 4. BACKUPS

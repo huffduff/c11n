@@ -43,13 +43,14 @@ closed and password auth is off for `users`, so the fixtures need the one
 account that can do both. It has nothing to do with the owner's account.
 
 ```
-kubectl exec deploy/c11n -c pocketbase -- \
+kubectl exec statefulset/c11n-pocketbase -c pocketbase -- \
   /pb/pocketbase superuser upsert e2e-su@c11n.test 'a-long-e2e-password' --dir=/pb/pb_data
 ```
 
 `--dir` is required because the container's default data dir is set by the CMD's
 flag, not by the executable. Re-run the command to rotate the password; it
-upserts.
+upserts. `-c pocketbase` is needed on a resource reference; the pod is
+`c11n-pocketbase-0` if you prefer `kubectl exec c11n-pocketbase-0 -- …`.
 
 ## 3. Reach the two origins
 
@@ -57,16 +58,26 @@ Two different origins are needed, because the fixtures talk to PocketBase
 **directly** for seeding: the superuser API must not go through the proxy under
 test (the proxy overwrites Authorization with the session cookie, by design).
 
+They are two different objects now (a Deployment for the proxy, a Service for the
+database), so it is two commands, in two shells:
+
 ```
-kubectl port-forward deploy/c11n 18080:8080 18090:8090
+kubectl port-forward deploy/c11n-caddy 18080:8080
+kubectl port-forward svc/c11n-pocketbase 18090:8090
 ```
 
-- `18080` → Caddy in the pod: the review origin, the same port the local stack
-  uses, so `C11N_E2E_BASE_URL=http://127.0.0.1:18080` and any invite link the
-  install prints work unchanged.
-- `18090` → PocketBase in the same pod: `C11N_E2E_PB_URL=http://127.0.0.1:18090`.
+- `18080` → Caddy: the review origin, the same port the local stack uses, so
+  `C11N_E2E_BASE_URL=http://127.0.0.1:18080` and any invite link the install
+  prints work unchanged.
+- `18090` → the pocketbase Service: `C11N_E2E_PB_URL=http://127.0.0.1:18090`.
 
-Keep that command running in its own shell; the suite does not manage it.
+Keep both running in their own shells; the suite does not manage them.
+
+The chart's NetworkPolicy is on by default. It does not restrict caddy's egress
+or pocketbase's ingress from caddy, but `kubectl port-forward` arrives from the
+kubelet and whether a CNI applies policy to that traffic varies. If one of the
+two hangs, add the node subnet to `networkPolicy.additionalAllowedCidrs`, or
+re-install with `scripts/cluster/install-closedcloud.sh NETWORK_POLICY=0`.
 
 ### Why a port-forward and not the Traefik hostname
 
@@ -90,7 +101,7 @@ with a reason, and the rest of the file still runs.
 
 | Spec | Skips | Because |
 |---|---|---|
-| `identity.spec` "3.2 bootstrap owner" | whole describe | the one-time link is on the pod's stdout; read it with `kubectl logs deploy/c11n -c pocketbase \| grep 'c11n bootstrap'` |
+| `identity.spec` "3.2 bootstrap owner" | whole describe | the one-time link is on the pocketbase pod's stdout; read it with `kubectl logs statefulset/c11n-pocketbase -c pocketbase \| grep 'c11n bootstrap'` |
 | `token-logs.spec` | whole file | reads the local stack log for the bootstrap token |
 | `smoke.spec` "Caddyfile env matrix" | whole describe | needs `CADDY_BIN` (native `caddy validate`); the cluster runs the same file baked into the image |
 | `topology.spec` "gzip-accepting HTML request" | the direct-upstream half | talks to `127.0.0.1:15174`, the local fixture port; the in-cluster upstream has no published port |

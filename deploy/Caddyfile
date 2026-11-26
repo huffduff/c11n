@@ -117,6 +117,21 @@
 			# don't let upstream compress; replace needs plaintext
 			header_up Accept-Encoding identity
 			import upstream_tls_{$C11N_UPSTREAM_TLS:verify}
+			# I-2: the reviewed app (and any script it loads) must never see the
+			# session cookie. Strip ONLY c11n_session from the request Cookie
+			# header: the app's own cookies keep flowing, in every position
+			# (first, middle, last), and the leading `; ` of a middle hit goes
+			# with it. When c11n_session is the only cookie the expression
+			# leaves an empty header value, which every server treats as "no
+			# cookies" — harmless, and deleting it conditionally is not
+			# expressible here.
+			header_up Cookie "(^|;\s*)c11n_session=[^;]*" ""
+			# ... and it cannot set one either: an upstream Set-Cookie for the
+			# session name is renamed, so the browser stores an inert
+			# c11n_blocked cookie instead of replacing the bearer. The replace
+			# applies to each Set-Cookie value independently, so the app's own
+			# cookies in the same response are unaffected.
+			header_down Set-Cookie "(?i)^\s*c11n_session=" "c11n_blocked="
 			# staging-review tradeoff: strip CSP so the injected script runs
 			header_down -Content-Security-Policy
 		}

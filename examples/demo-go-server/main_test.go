@@ -232,3 +232,61 @@ func TestRangeBypassesGzip(t *testing.T) {
 		t.Fatalf("Range request: Vary %q lacks Accept-Encoding", vary)
 	}
 }
+
+// TestEchoReportsReceivedHeaders: the fixture route e2e uses to prove the proxy
+// strips the session cookie from the upstream request. It must report the
+// headers the upstream actually received, and nothing cached.
+func TestEchoReportsReceivedHeaders(t *testing.T) {
+	rec := get(t, newHandler(fixture()), "/__echo", map[string]string{
+		"Cookie":          "app_cookie=1",
+		"X-C11n-User":     "user123",
+		"X-C11n-Role":     "client",
+		"X-Forwarded-For": "127.0.0.1",
+	})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("/__echo: status %d, want 200", rec.Code)
+	}
+	if cc := rec.Header().Get("Cache-Control"); cc != "no-store" {
+		t.Fatalf("/__echo: Cache-Control %q, want no-store", cc)
+	}
+	if sc := rec.Header().Values("Set-Cookie"); len(sc) != 0 {
+		t.Fatalf("/__echo: Set-Cookie %q, want none without ?setcookie=1", sc)
+	}
+	var body struct {
+		Method  string              `json:"method"`
+		Path    string              `json:"path"`
+		Headers map[string][]string `json:"headers"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("/__echo: invalid JSON: %v", err)
+	}
+	if body.Method != http.MethodGet || body.Path != "/__echo" {
+		t.Fatalf("/__echo: reported %s %s", body.Method, body.Path)
+	}
+	if got := body.Headers["Cookie"]; len(got) != 1 || got[0] != "app_cookie=1" {
+		t.Fatalf("/__echo: Cookie %q, want [app_cookie=1]", got)
+	}
+	if got := body.Headers["X-C11n-User"]; len(got) != 1 || got[0] != "user123" {
+		t.Fatalf("/__echo: X-C11n-User %q", got)
+	}
+}
+
+// TestEchoPlantsTwoCookies: ?setcookie=1 emits the hostile c11n_session cookie
+// AND an application cookie in one response, so the e2e spec can prove the
+// header_down replacement is per-value (it must not eat app_cookie).
+func TestEchoPlantsTwoCookies(t *testing.T) {
+	rec := get(t, newHandler(fixture()), "/__echo?setcookie=1", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("/__echo?setcookie=1: status %d, want 200", rec.Code)
+	}
+	sc := rec.Header().Values("Set-Cookie")
+	want := []string{"c11n_session=planted; Path=/; HttpOnly", "app_cookie=1; Path=/"}
+	if len(sc) != len(want) {
+		t.Fatalf("/__echo?setcookie=1: Set-Cookie %q, want %q", sc, want)
+	}
+	for i := range want {
+		if sc[i] != want[i] {
+			t.Fatalf("/__echo?setcookie=1: Set-Cookie[%d] %q, want %q", i, sc[i], want[i])
+		}
+	}
+}

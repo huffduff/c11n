@@ -60,6 +60,36 @@ func newHandler(files fs.FS) http.Handler {
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]any{"ok": true, "server": "go"})
 	})
+	// /__echo is a TEST-ONLY fixture route, not part of the demo app: it exists
+	// so e2e/specs/upstream-cookie.spec.ts can see exactly which request
+	// headers the upstream received, and can make the upstream try to plant a
+	// cookie. `?setcookie=1` emits two Set-Cookie headers, so the spec also
+	// proves Caddy's header_down replacement acts on each value of a
+	// multi-valued Set-Cookie response.
+	mux.HandleFunc("/__echo", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet && r.Method != http.MethodHead {
+			w.Header().Set("Allow", "GET, HEAD")
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		// The body describes one request; a cached copy would lie.
+		w.Header().Set("Cache-Control", "no-store")
+		if r.URL.Query().Get("setcookie") == "1" {
+			w.Header().Add("Set-Cookie", "c11n_session=planted; Path=/; HttpOnly")
+			w.Header().Add("Set-Cookie", "app_cookie=1; Path=/")
+		}
+		headers := make(map[string][]string, len(r.Header))
+		for k, v := range r.Header {
+			headers[k] = v
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"method":  r.Method,
+			"path":    r.URL.Path,
+			"query":   r.URL.RawQuery,
+			"headers": headers,
+		})
+	})
 	// Unknown /api paths are API misses, not client-side routes: answering
 	// them with index.html made a typo'd fetch parse HTML as JSON.
 	mux.HandleFunc("/api/", func(w http.ResponseWriter, r *http.Request) {

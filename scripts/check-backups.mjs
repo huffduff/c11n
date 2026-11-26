@@ -85,14 +85,24 @@ function run(cmd, args, env) {
 }
 
 async function api(method, url, { token, data } = {}) {
-  const res = await fetch(`${BASE}${url}`, {
-    method,
-    headers: {
-      ...(token ? { authorization: token } : {}),
-      ...(data ? { 'content-type': 'application/json' } : {}),
-    },
-    ...(data ? { body: JSON.stringify(data) } : {}),
-  })
+  // A restore makes PocketBase re-exec: for a moment nothing is listening and
+  // fetch() throws ECONNREFUSED. That is a state this script polls THROUGH, not
+  // an error: report it as status 0 and let the caller retry. Anything that
+  // treats 0 as success (nothing does) would be a bug of its own.
+  let res
+  try {
+    res = await fetch(`${BASE}${url}`, {
+      method,
+      headers: {
+        ...(token ? { authorization: `Bearer ${token}` } : {}),
+        ...(data ? { 'content-type': 'application/json' } : {}),
+      },
+      ...(data ? { body: JSON.stringify(data) } : {}),
+      signal: AbortSignal.timeout(5000),
+    })
+  } catch (err) {
+    return { status: 0, json: undefined, text: `${err.message}` }
+  }
   const text = await res.text()
   let json
   try {
@@ -265,9 +275,12 @@ async function main() {
 
     // The restore is ASYNCHRONOUS: PocketBase unpacks the backup into the data
     // dir and restarts itself (the process re-execs and the log shows a second
-    // "Server started"). So poll: a single sleep either flakes or hides a real
-    // failure. The superuser row comes from the restored database, which also
-    // proves the restored file is a working PocketBase.
+    // "Server started"). Between the 204 and the new listener every request
+    // fails at the socket layer, so wait for /api/health before polling - and
+    // then poll, because a single sleep either flakes or hides a real failure.
+    // The superuser row comes from the restored database, which also proves the
+    // restored file is a working PocketBase. Bounded: 30 s to come back, then
+    // 30 s for the data to match.
     const findSlug = async (token, slug) => {
       const res = await api(
         'GET',
@@ -276,6 +289,7 @@ async function main() {
       )
       return res.json?.totalItems ?? -1
     }
+    await waitHealthy(30_000)
     let token = su.token
     let kept = -1
     let gone = -1

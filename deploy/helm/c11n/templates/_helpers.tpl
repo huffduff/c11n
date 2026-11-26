@@ -57,12 +57,32 @@ with tls.mode=none, because TLS may be terminated in front of the cluster.
 {{- end -}}
 {{- end -}}
 
+{{/*
+Secret holding the admin host's certificate. Deliberately NOT the review host's
+Secret: cert-manager writes one certificate per Secret, so two Ingresses sharing
+a name overwrite each other's certificate (and the admin host ends up presenting
+the review host's). Default <adminHost>-tls, overridable via adminIngress.tls.
+*/}}
+{{- define "c11n.adminTlsSecretName" -}}
+{{- default (printf "%s-tls" .Values.adminIngress.host) .Values.adminIngress.tls.secretName -}}
+{{- end -}}
+
 {{- define "c11n.caddyImage" -}}
-{{- printf "%s:%s" .Values.caddy.image.repository (default .Chart.AppVersion .Values.caddy.image.tag) -}}
+{{- $repo := .Values.caddy.image.repository -}}
+{{- if .Values.caddy.image.digest -}}
+{{- printf "%s@%s" $repo .Values.caddy.image.digest -}}
+{{- else -}}
+{{- printf "%s:%s" $repo (default .Chart.AppVersion .Values.caddy.image.tag) -}}
+{{- end -}}
 {{- end -}}
 
 {{- define "c11n.pocketbaseImage" -}}
-{{- printf "%s:%s" .Values.pocketbase.image.repository (default .Chart.AppVersion .Values.pocketbase.image.tag) -}}
+{{- $repo := .Values.pocketbase.image.repository -}}
+{{- if .Values.pocketbase.image.digest -}}
+{{- printf "%s@%s" $repo .Values.pocketbase.image.digest -}}
+{{- else -}}
+{{- printf "%s:%s" $repo (default .Chart.AppVersion .Values.pocketbase.image.tag) -}}
+{{- end -}}
 {{- end -}}
 
 {{/*
@@ -104,6 +124,39 @@ Ingress templates call them too so a bad set never renders a half-chart.
 {{- if .Values.adminIngress.enabled -}}
 {{- if not .Values.adminIngress.host -}}
 {{- fail "c11n: adminIngress.host is required when adminIngress.enabled=true" -}}
+{{- end -}}
+{{- if and (ne .Values.tls.mode "none") (eq (include "c11n.adminTlsSecretName" .) (include "c11n.tlsSecretName" .)) -}}
+{{- fail (printf "c11n: the admin Ingress must not share the review host's TLS Secret (%q); set adminIngress.tls.secretName (default <adminHost>-tls)" (include "c11n.adminTlsSecretName" .)) -}}
+{{- end -}}
+{{- end -}}
+{{/*
+Credentials. The Deployment emits a secretKeyRef for each of these, so a value
+that is missing here is a Pod that cannot start (CreateContainerConfigError:
+"secret not found"). Fail at render time instead, naming the value.
+*/}}
+{{- if .Values.backup.cron -}}
+{{- if not .Values.backup.s3.bucket -}}
+{{- fail "c11n: backup.cron is set but backup.s3.bucket is empty (scheduled backups need a bucket; leave backup.cron empty to disable them)" -}}
+{{- end -}}
+{{- if not .Values.backup.s3.endpoint -}}
+{{- fail "c11n: backup.cron is set but backup.s3.endpoint is empty (PocketBase refuses a blank endpoint, e.g. https://s3.eu-central-1.amazonaws.com)" -}}
+{{- end -}}
+{{- if not .Values.backup.s3.region -}}
+{{- fail "c11n: backup.cron is set but backup.s3.region is empty (PocketBase refuses a blank region, e.g. eu-central-1)" -}}
+{{- end -}}
+{{- if not .Values.backup.s3.accessKey -}}
+{{- fail "c11n: backup.cron is set but backup.s3.accessKey is empty (both accessKey and secretKey are required)" -}}
+{{- end -}}
+{{- if not .Values.backup.s3.secretKey -}}
+{{- fail "c11n: backup.cron is set but backup.s3.secretKey is empty (both accessKey and secretKey are required)" -}}
+{{- end -}}
+{{- end -}}
+{{- if .Values.smtp.enabled -}}
+{{- if not .Values.smtp.host -}}
+{{- fail "c11n: smtp.enabled=true needs smtp.host" -}}
+{{- end -}}
+{{- if and .Values.smtp.authEnabled (not .Values.smtp.password) -}}
+{{- fail "c11n: smtp.enabled=true with smtp.authEnabled=true needs smtp.password (set smtp.authEnabled=false only for a trusted local mail catcher)" -}}
 {{- end -}}
 {{- end -}}
 {{- end -}}

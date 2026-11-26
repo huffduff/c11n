@@ -39,8 +39,44 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  # The chart's appVersion IS the image tag a release installs (and its
+  # `version` is the chart version helm records). A tag cut without bumping
+  # them ships a chart that points at images this release does not build, so
+  # fail BEFORE the images job pushes anything. The alternative - regenerating
+  # the chart at release time - hides the drift; this makes it a one-line fix
+  # (bump Chart.yaml version + appVersion) documented in docs/runbook.md §1.
+  chart:
+    name: chart matches the tag
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Chart.yaml version and appVersion match the tag
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          chart_version="$(sed -n 's/^version:[[:space:]]*"\?\([^"]*\)"\?[[:space:]]*$/\1/p' deploy/helm/c11n/Chart.yaml)"
+          app_version="$(sed -n 's/^appVersion:[[:space:]]*"\?\([^"]*\)"\?[[:space:]]*$/\1/p' deploy/helm/c11n/Chart.yaml)"
+          echo "tag=${GITHUB_REF_NAME} version=${chart_version} appVersion=${app_version} expected=${version}"
+          if [ -z "${chart_version}" ] || [ -z "${app_version}" ]; then
+            echo "::error::could not read version/appVersion from deploy/helm/c11n/Chart.yaml"
+            exit 1
+          fi
+          if [ "${app_version}" != "${version}" ]; then
+            echo "::error::Chart.yaml appVersion=${app_version} but the tag names ${version}: bump Chart.yaml version and appVersion before tagging (docs/runbook.md §1)."
+            exit 1
+          fi
+          if [ "${chart_version}" != "${version}" ]; then
+            echo "::error::Chart.yaml version=${chart_version} but the tag names ${version}: bump Chart.yaml version and appVersion before tagging (docs/runbook.md §1)."
+            exit 1
+          fi
+
   images:
     name: ${{ matrix.image }}
+    # No image is pushed for a tag whose chart disagrees with it.
+    needs: chart
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     permissions:

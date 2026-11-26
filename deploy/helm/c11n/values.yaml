@@ -88,15 +88,22 @@ cookie:
 # ---- images ----------------------------------------------------------------
 # Both default to GHCR and to the chart's appVersion, so a release tag installs
 # the pair of images built for it (see .github/workflows/release.yml).
+#
+# `digest` (optional) pins the exact image: when set it wins over `tag` and
+# renders `repository@digest`. The closedcloud install script uses it, because
+# a tag plus IfNotPresent is how a rebuilt image gets silently reused.
 caddy:
   image:
     repository: ghcr.io/huffduff/c11n-caddy
     # Empty = .Chart.AppVersion.
     tag: ""
+    # e.g. sha256:6f1c… Empty = build the reference from repository + tag.
+    digest: ""
 pocketbase:
   image:
     repository: ghcr.io/huffduff/c11n-pocketbase
     tag: ""
+    digest: ""
 
 image:
   # Always IfNotPresent: a moving tag would silently re-pull a different image
@@ -138,12 +145,21 @@ affinity: {}
 podAnnotations: {}
 
 # ---- scheduled S3 backups (PocketBase settings.backups) -------------------
-# Applied at boot from these values by pb_hooks/settings.pb.js. Disabled
-# unless backup.cron is non-empty. This is PocketBase's own S3 backup
-# machinery: it uploads a zip of pb_data on the cron schedule and prunes to
-# backup.keep. It does NOT restore - see docs/runbook.md.
+# Applied from these values by pb_hooks/settings.pb.js on the FIRST HTTP
+# REQUEST after the container starts (not at boot: PocketBase has no boot hook
+# whose schema is migrated). Disabled unless backup.cron is non-empty.
+#
+# With backup values set, these values are the source of truth: a change made
+# in the admin UI's Settings → Backups page is REVERTED on the next pod start.
+# Change the values and `helm upgrade` instead.
+#
+# This is PocketBase's own S3 backup machinery: it uploads a zip of pb_data on
+# the cron schedule and prunes to backup.keep. It does NOT restore - see
+# docs/runbook.md.
 backup:
   # Standard 5-field cron, e.g. "0 3 * * *" for 03:00 daily. Empty = off.
+  # Non-empty REQUIRES s3.bucket, s3.accessKey and s3.secretKey (the render
+  # fails with a message naming the missing value).
   cron: ""
   # How many backups to keep in the bucket.
   keep: 14
@@ -163,6 +179,8 @@ backup:
 # Wired into the environment for the day PocketBase sends invite mail, but
 # NOTHING reads these yet: invites are copy-the-link only (ADR 0006, MVP
 # scope). Setting them changes no behaviour. pb_hooks do not apply them.
+# When enabled, smtp.host is required and smtp.password is required while
+# smtp.authEnabled is true (the render fails otherwise).
 smtp:
   enabled: false
   host: ""
@@ -187,3 +205,33 @@ adminIngress:
   # Empty = ingress.className.
   className: ""
   annotations: {}
+  # TLS for the admin host. cert-manager writes ONE certificate per Secret, so
+  # reusing the review host's Secret here would make the two Ingresses fight
+  # over it; the default is therefore a separate `<adminHost>-tls`.
+  tls:
+    # Empty = <adminIngress.host>-tls. With tls.mode=existingSecret, set a
+    # Secret that contains the admin host's certificate.
+    secretName: ""
+
+# ---- network policy --------------------------------------------------------
+# Off by default (a NetworkPolicy needs a CNI that enforces it, and a wrong
+# selector takes the site down). When on, it allows ingress to the pod ONLY on
+# the caddy port (8080) from the ingress controller's namespace - plus 8090
+# when adminIngress.enabled - and denies everything else.
+#
+# Without it, PocketBase's port 8090 is reachable on the pod IP from anywhere
+# in the cluster: there is no Service for it, but pods do not need one.
+networkPolicy:
+  enabled: false
+  # Namespace the ingress controller runs in (k3s/Traefik: kube-system,
+  # ingress-nginx: ingress-nginx). Matched on the automatic
+  # kubernetes.io/metadata.name label.
+  ingressNamespace: ingress-nginx
+  # Optional: narrow it to the controller's pods, e.g.
+  #   ingressPodSelector: { app.kubernetes.io/name: traefik }
+  # Empty = any pod in the namespace.
+  ingressPodSelector: {}
+  # Optional extra sources, as CIDRs. `kubectl port-forward` arrives from the
+  # node, and whether a CNI treats that as "outside the cluster" varies: add the
+  # node subnet here if port-forward must keep working with the policy on.
+  additionalAllowedCidrs: []

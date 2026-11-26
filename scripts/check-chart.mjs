@@ -139,6 +139,68 @@ const guards = [
   { name: 'existingSecret without secretName', args: ['--set', 'tls.mode=existingSecret', '--set', 'tls.secretName='], expect: 'tls.secretName is required' },
   { name: 'unknown tls.mode', args: ['--set', 'tls.mode=whatever'], expect: 'tls.mode must be' },
   { name: 'insecure upstream.tls on plain http', args: ['--set', 'upstream.url=http://app.internal', '--set', 'upstream.tls=insecure'], expect: 'needs an https:// upstream.url' },
+  // Credentials: each of these renders a Deployment with a secretKeyRef to a
+  // key that would not exist, i.e. a pod stuck in CreateContainerConfigError.
+  {
+    name: 'backup.cron without a bucket',
+    args: ['--set-json', 'backup.cron="0 3 * * *"'],
+    expect: 'backup.s3.bucket is empty',
+  },
+  {
+    // PocketBase's own settings validation refuses a blank endpoint/region, and
+    // a save that fails leaves backups off - so the render refuses first.
+    name: 'backup.cron without an endpoint',
+    args: [
+      '--set-json', 'backup.cron="0 3 * * *"',
+      '--set', 'backup.s3.bucket=b', '--set', 'backup.s3.region=r',
+      '--set', 'backup.s3.accessKey=a', '--set', 'backup.s3.secretKey=s',
+    ],
+    expect: 'backup.s3.endpoint is empty',
+  },
+  {
+    name: 'backup.cron without a region',
+    args: [
+      '--set-json', 'backup.cron="0 3 * * *"',
+      '--set', 'backup.s3.bucket=b', '--set', 'backup.s3.endpoint=https://s3.example.com',
+      '--set', 'backup.s3.accessKey=a', '--set', 'backup.s3.secretKey=s',
+    ],
+    expect: 'backup.s3.region is empty',
+  },
+  {
+    name: 'backup.cron without an access key',
+    args: [
+      '--set-json', 'backup.cron="0 3 * * *"',
+      '--set', 'backup.s3.bucket=b', '--set', 'backup.s3.endpoint=https://s3.example.com',
+      '--set', 'backup.s3.region=r', '--set', 'backup.s3.secretKey=s',
+    ],
+    expect: 'backup.s3.accessKey is empty',
+  },
+  {
+    name: 'backup.cron without a secret key',
+    args: [
+      '--set-json', 'backup.cron="0 3 * * *"',
+      '--set', 'backup.s3.bucket=b', '--set', 'backup.s3.endpoint=https://s3.example.com',
+      '--set', 'backup.s3.region=r', '--set', 'backup.s3.accessKey=a',
+    ],
+    expect: 'backup.s3.secretKey is empty',
+  },
+  { name: 'smtp.enabled without a host', args: ['--set', 'smtp.enabled=true'], expect: 'needs smtp.host' },
+  {
+    name: 'smtp auth without a password',
+    args: ['--set', 'smtp.enabled=true', '--set', 'smtp.host=smtp.example.com', '--set', 'smtp.password='],
+    expect: 'needs smtp.password',
+  },
+  {
+    // cert-manager writes one certificate per Secret: the admin Ingress must not
+    // point at the review host's.
+    name: 'admin Ingress sharing the review TLS Secret',
+    args: [
+      '--set', 'adminIngress.enabled=true',
+      '--set', 'adminIngress.host=admin.review.example.com',
+      '--set', 'adminIngress.tls.secretName=review.example.com-tls',
+    ],
+    expect: 'must not share the review host',
+  },
 ]
 
 const base = path.join(ciDir, 'traefik-certmanager.yaml')
@@ -147,6 +209,93 @@ for (const guard of guards) {
   const failed = res.status !== 0
   const message = `${res.stderr}${res.stdout}`
   check(failed && message.includes(guard.expect), `guard: ${guard.name} fails the render`, failed ? res.stderr : res.stderr.slice(0, 1500) || '<render succeeded>')
+}
+
+// ---- rendered objects that must agree with each other -----------------------
+// A snapshot says "the render changed"; these say "the render is consistent",
+// which is the class of bug a snapshot cannot describe: a Deployment that
+// references a Secret nobody rendered, two Ingresses that would fight over one
+// certificate, a digest that silently lost to a tag.
+
+function documents(text) {
+  // helm puts a `# Source: chart/templates/x.yaml` line at the top of every
+  // document; drop comment lines so the checks below see the object itself.
+  return text
+    .split(/^---$/m)
+    .map((doc) =>
+      doc
+        .split('\n')
+        .filter((line) => !line.trimStart().startsWith('#'))
+        .join('\n')
+        .trim(),
+    )
+    .filter((doc) => doc !== '')
+}
+
+function kindOf(doc) {
+  return doc.match(/^kind:\s*(\S+)$/m)?.[1] ?? ''
+}
+
+function metadataName(doc) {
+  return doc.match(/^metadata:\n(?:.*\n)*?\s{2}name:\s*(\S+)$/m)?.[1] ?? ''
+}
+
+const renders = new Map()
+for (const file of valueFiles) {
+  const label = path.relative(repoRoot, path.join(ciDir, file))
+  const res = helm(['template', RELEASE, chartDir, '--namespace', NAMESPACE, '--values', path.join(ciDir, file)])
+  if (res.status !== 0) {
+    check(false, `${label} renders for the consistency checks`, res.stderr)
+    continue
+  }
+  renders.set(label, res.stdout)
+}
+
+for (const [label, text] of renders) {
+  const docs = documents(text)
+  const secrets = docs.filter((doc) => kindOf(doc) === 'Secret')
+
+  // Every secretKeyRef must point at a rendered Secret AND an existing key, or
+  // the pod never starts.
+  const refs = [...text.matchAll(/secretKeyRef:\s*\n\s*name:\s*(\S+)\s*\n\s*key:\s*(\S+)/g)]
+  const missing = []
+  for (const [, name, key] of refs) {
+    const doc = secrets.find((candidate) => metadataName(candidate) === name)
+    if (!doc) {
+      missing.push(`Secret ${name} is not rendered`)
+    } else if (!new RegExp(`^\\s{2}${key}:\\s*\\S+$`, 'm').test(doc)) {
+      missing.push(`Secret ${name} has no ${key}`)
+    }
+  }
+  check(missing.length === 0, `${label}: every secretKeyRef has a Secret and a key`, missing.join('; '))
+
+  // Two Ingresses, one certificate: the names must differ. Only Ingresses that
+  // actually terminate TLS have a secretName (tls.mode=none renders none).
+  const ingressSecrets = docs
+    .filter((doc) => kindOf(doc) === 'Ingress' && /^\s{2}tls:$/m.test(doc))
+    .map((doc) => (doc.match(/^\s+secretName:\s*(\S+)$/m)?.[1] ?? '').replace(/"/g, ''))
+  if (ingressSecrets.length > 1) {
+    check(
+      ingressSecrets.every((name) => name !== '') && new Set(ingressSecrets).size === ingressSecrets.length,
+      `${label}: the review and admin Ingresses use different TLS Secrets (${ingressSecrets.join(', ')})`,
+    )
+  }
+
+  // A digest must beat the tag: `<repo>@sha256:<64 hex>`, never `<repo>:<tag>`.
+  const digested = [...text.matchAll(/^\s+image:\s*(\S+)$/gm)].map((m) => m[1].replace(/"/g, ''))
+  if (label.endsWith('certmanager-admin.yaml')) {
+    check(
+      digested.length > 0 && digested.every((image) => /@sha256:[0-9a-f]{64}$/.test(image)),
+      `${label}: image.digest renders repo@sha256:… (${digested.join(', ')})`,
+    )
+  }
+
+  // No pod in this chart may carry a usable API token.
+  const deployments = docs.filter((doc) => kindOf(doc) === 'Deployment')
+  check(
+    deployments.length > 0 && deployments.every((doc) => /^\s{6}automountServiceAccountToken:\s*false$/m.test(doc)),
+    `${label}: automountServiceAccountToken is false`,
+  )
 }
 
 // ---- CI and local tool pins agree ------------------------------------------

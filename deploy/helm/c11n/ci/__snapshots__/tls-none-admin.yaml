@@ -90,11 +90,11 @@ spec:
         app.kubernetes.io/name: c11n
         app.kubernetes.io/instance: c11n
       annotations:
-        # Restart the pod when the configuration changes: a changed upstream,
-        # host or TTL must take effect on upgrade, and env is only read at
-        # process start.
-        checksum/config: 10c1863ee27e253280ab5dc7cb470f20da126117e39a8191185f113e764010cc
+        checksum/config: 58ea1e8445e5132f559838c21181bc336528570bc1e408db1b5e16da28c3abd9
     spec:
+      # Nothing in this pod talks to the Kubernetes API, so it has no token to
+      # misuse if a container is compromised.
+      automountServiceAccountToken: false
       # Both images run as 65532 (see their Dockerfiles). Numeric ids because
       # runAsNonRoot cannot verify a named user; fsGroup makes the PVC
       # writable for pocketbase without a chown.

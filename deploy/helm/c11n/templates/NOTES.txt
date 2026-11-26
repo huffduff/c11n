@@ -45,5 +45,5 @@ TLS: cert-manager ({{ .Values.tls.issuer }}) -> Secret {{ include "c11n.tlsSecre
 {{ if .Values.adminIngress.enabled -}}
 
 WARNING: adminIngress is ON - the superuser UI is published at
-https://{{ .Values.adminIngress.host }}/_/ . Turn it off when you are done.
+{{ include "c11n.scheme" . }}://{{ .Values.adminIngress.host }}/_/ . Turn it off when you are done.
 {{- end }}

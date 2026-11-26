@@ -47,6 +47,9 @@ spec:
   tls:
     - hosts:
         - {{ .Values.adminIngress.host | quote }}
-      secretName: {{ include "c11n.tlsSecretName" . | quote }}
+      # Its OWN Secret (<adminHost>-tls by default): cert-manager keeps one
+      # certificate per Secret, so sharing the review host's name would make the
+      # two Ingresses overwrite each other's certificate.
+      secretName: {{ include "c11n.adminTlsSecretName" . | quote }}
   {{- end }}
 {{- end }}

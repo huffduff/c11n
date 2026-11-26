@@ -1,0 +1,47 @@
+# Chart verification values: cert-manager + the admin UI published + a
+# NetworkPolicy.
+#
+# Two things this file exists for:
+#   * the admin Ingress gets its OWN TLS Secret. cert-manager writes one
+#     certificate per Secret, so a shared name means the two Ingresses overwrite
+#     each other's certificate. check-chart asserts the two names differ.
+#   * networkPolicy.enabled=true renders one, scoped to the ingress controller's
+#     namespace and narrowed to its pods.
+# The image digests prove `digest` wins over `tag` and renders repo@digest.
+host: review.example.com
+
+upstream:
+  url: https://staging.example.com
+
+owner:
+  email: owner@example.com
+
+ingress:
+  className: traefik
+
+tls:
+  mode: certManager
+  issuer: letsencrypt-prod
+
+adminIngress:
+  enabled: true
+  host: admin.review.example.com
+
+networkPolicy:
+  enabled: true
+  ingressNamespace: kube-system
+  ingressPodSelector:
+    app.kubernetes.io/name: traefik
+  additionalAllowedCidrs:
+    - 10.0.0.0/8
+
+caddy:
+  image:
+    digest: sha256:1111111111111111111111111111111111111111111111111111111111111111
+pocketbase:
+  image:
+    digest: sha256:2222222222222222222222222222222222222222222222222222222222222222
+
+persistence:
+  storageClass: local-path
+  size: 5Gi

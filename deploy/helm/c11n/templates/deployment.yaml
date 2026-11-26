@@ -23,14 +23,20 @@ spec:
       labels:
         {{- include "c11n.selectorLabels" . | nindent 8 }}
       annotations:
-        {{- with .Values.podAnnotations }}
-        {{- toYaml . | nindent 8 }}
-        {{- end }}
-        # Restart the pod when the configuration changes: a changed upstream,
-        # host or TTL must take effect on upgrade, and env is only read at
-        # process start.
-        checksum/config: {{ .Values | toJson | sha256sum }}
+        {{- /*
+        podAnnotations FIRST, checksum/config LAST: set() overwrites, so a user
+        annotation named checksum/config is replaced rather than emitted twice
+        (a duplicate key is rejected by the YAML parser before the object exists).
+        Restart the pod when the configuration changes: a changed upstream, host
+        or TTL must take effect on upgrade, and env is only read at process start.
+        */}}
+        {{- $annotations := deepCopy (.Values.podAnnotations | default dict) }}
+        {{- $_ := set $annotations "checksum/config" (.Values | toJson | sha256sum) }}
+        {{- toYaml $annotations | nindent 8 }}
     spec:
+      # Nothing in this pod talks to the Kubernetes API, so it has no token to
+      # misuse if a container is compromised.
+      automountServiceAccountToken: false
       {{- with .Values.imagePullSecrets }}
       imagePullSecrets:
         {{- toYaml . | nindent 8 }}
@@ -197,11 +203,17 @@ spec:
               value: {{ .Values.smtp.tls | quote }}
             - name: C11N_SMTP_AUTH
               value: {{ .Values.smtp.authEnabled | quote }}
+            {{- /* Only when there is one: with authEnabled=false there is no
+            password, and a secretKeyRef to a missing key is a pod that cannot
+            start. c11n.validate fails the render when authEnabled=true and it is
+            empty, so this branch is "no auth" or "password present". */}}
+            {{- if .Values.smtp.password }}
             - name: C11N_SMTP_PASSWORD
               valueFrom:
                 secretKeyRef:
                   name: {{ include "c11n.fullname" . }}-secrets
                   key: smtp-password
+            {{- end }}
             {{- end }}
             - name: TZ
               value: UTC

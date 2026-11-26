@@ -26,6 +26,13 @@ The chart defaults both repositories to GHCR and both tags to `appVersion`, so a
 chart release installs the matching pair with no image values. A private GHCR
 package needs `imagePullSecrets` set to a pull secret in the namespace.
 
+**Bump `deploy/helm/c11n/Chart.yaml` before tagging.** `version` and
+`appVersion` must both equal the tag without its `v` (`v1.2.3` → `1.2.3`):
+`appVersion` is the image tag the chart installs, so a tag cut without the bump
+would deploy the previous release's images. The `chart` job in
+`.github/workflows/release.yml` fails the release (before any image is pushed)
+when they disagree.
+
 ```sh
 helm upgrade --install <rel> deploy/helm/c11n \
   --namespace <ns> --create-namespace \
@@ -50,6 +57,7 @@ Where the environment differs, it is a value — nothing is hardcoded:
 | hostname / origin in invite links | `host`, `publicUrl` (default `https://<host>`) |
 | ingress class and extra annotations | `ingress.className`, `ingress.annotations` |
 | TLS | `tls.mode`: `certManager` (+`tls.issuer`), `existingSecret` (+`tls.secretName`), `none` |
+| admin UI TLS | `adminIngress.tls.secretName` (default `<adminHost>-tls`, never the review host's Secret) |
 | storage | `persistence.storageClass` (empty = cluster default), `persistence.size` |
 | sizing / placement | `resources.caddy`, `resources.pocketbase`, `nodeSelector`, `tolerations`, `affinity` |
 | the reviewed site | `upstream.url`, `upstream.tls` (`verify`\|`insecure`) |
@@ -57,6 +65,7 @@ Where the environment differs, it is a value — nothing is hardcoded:
 | backups | `backup.cron`, `backup.keep`, `backup.s3.*` |
 | mail (inert until post-MVP) | `smtp.*` |
 | admin UI exposure | `adminIngress.enabled` (default false), `adminIngress.host` |
+| network policy | `networkPolicy.enabled` (default false), `networkPolicy.ingressNamespace`, `networkPolicy.ingressPodSelector` |
 
 On a disposable test cluster (closedcloud), `scripts/cluster/install-closedcloud.sh`
 does the whole install, including building the images in-cluster.
@@ -149,6 +158,9 @@ backup:
 
 - The access key and secret land in a chart-managed Secret, not in the pod spec;
   the hook never logs either (only bucket/endpoint/region/cron/keep).
+- These values are then the source of truth: the hook re-applies them on every
+  pod start, so a change made on the admin UI's Backups page is **reverted by
+  the next restart**. Change the values and `helm upgrade`.
 - Each run uploads a zip of `pb_data` (database + uploads) and prunes to `keep`.
 - What this is **not**: it is not a restore, and it does not back up the PVC's
   other files. It is also inside the same failure domain as the pod's credentials
@@ -224,7 +236,16 @@ kubectl port-forward deploy/<rel> -n <ns> 8090:8090
 `adminIngress.enabled=true` exists for operators who need it published, but it
 puts the superuser login on a real hostname with no gate in front of it. If you
 use it, put TLS, an IP allowlist or an auth proxy in front, and turn it off
-when you are done.
+when you are done. Its Ingress gets its own TLS Secret (`<adminHost>-tls` by
+default): cert-manager keeps one certificate per Secret, so it must not share
+the review host's.
+
+The pod listens on 8090 (PocketBase) as well as 8080 (Caddy). There is no
+Service for 8090 unless `adminIngress.enabled` adds one, but **a Service is not
+required to reach a pod**: without `networkPolicy.enabled=true`, any pod in the
+cluster can dial `<podIP>:8090` and use the PocketBase API. Turning the policy
+on limits ingress to the caddy port from the ingress controller's namespace
+(`networkPolicy.ingressNamespace`, default `ingress-nginx`).
 
 Superuser accounts are separate from c11n users: the owner and reviewers do not
 have admin UI accounts.

@@ -1,0 +1,52 @@
+{{- if .Values.adminIngress.enabled }}
+{{- include "c11n.validate" . }}
+{{- /*
+  ###########################################################################
+  # WARNING: this publishes the PocketBase SUPERUSER login on a real host.   #
+  # Caddy deliberately answers 404 for the admin UI on the review host; this #
+  # Ingress bypasses Caddy entirely and talks to PocketBase on 8090. Anyone  #
+  # who can resolve the host can attempt a password (and superusers are not  #
+  # rate-limited the way invite links are). Put TLS, an IP allowlist or an   #
+  # auth proxy in front of it, and turn it off when you are done.            #
+  # The default is adminIngress.enabled=false; prefer the port-forward in    #
+  # NOTES.txt.                                                              #
+  ###########################################################################
+*/}}
+{{- $annotations := deepCopy (.Values.adminIngress.annotations | default dict) }}
+{{- if eq .Values.tls.mode "certManager" }}
+{{- $_ := set $annotations "cert-manager.io/cluster-issuer" .Values.tls.issuer }}
+{{- end }}
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ include "c11n.fullname" . }}-admin
+  labels:
+    {{- include "c11n.labels" . | nindent 4 }}
+  annotations:
+    c11n.io/warning: "PocketBase SUPERUSER UI - not the review host. See the chart's adminIngress values."
+    {{- with $annotations }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  {{- $class := default .Values.ingress.className .Values.adminIngress.className }}
+  {{- with $class }}
+  ingressClassName: {{ . | quote }}
+  {{- end }}
+  rules:
+    - host: {{ .Values.adminIngress.host | quote }}
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ include "c11n.fullname" . }}
+                port:
+                  name: pb-admin
+  {{- if ne .Values.tls.mode "none" }}
+  tls:
+    - hosts:
+        - {{ .Values.adminIngress.host | quote }}
+      secretName: {{ include "c11n.tlsSecretName" . | quote }}
+  {{- end }}
+{{- end }}

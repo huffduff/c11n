@@ -1,0 +1,49 @@
+c11n is up for {{ .Values.host }}.
+
+  URL:        {{ include "c11n.publicUrl" . }}
+  upstream:   {{ .Values.upstream.url }}
+  owner:      {{ .Values.owner.email }}
+
+{{ if eq .Values.tls.mode "none" -}}
+TLS: terminated in front of the cluster (tls.mode=none). The pod speaks http.
+{{- else if eq .Values.tls.mode "existingSecret" -}}
+TLS: from the existing Secret {{ include "c11n.tlsSecretName" . }}.
+{{- else -}}
+TLS: cert-manager ({{ .Values.tls.issuer }}) -> Secret {{ include "c11n.tlsSecretName" . }}.
+{{- end }}
+
+1. THE OWNER SIGN-IN LINK
+   The first owner is created on PocketBase's FIRST HTTP REQUEST (the readiness
+   probe triggers it), and the one-time link is printed to the pocketbase
+   container's stdout. It is in no other place - copy it now:
+
+     kubectl logs deploy/{{ include "c11n.fullname" . }} -c pocketbase | grep 'c11n bootstrap'
+
+   If the pod has already restarted, use --previous. The link is single use and
+   expires after {{ .Values.invite.ttlHours }}h; if it is lost, mint another
+   from an owner session (Invite in the overlay) - there is no email channel.
+
+2. SIGN IN
+   Open the link, click "Continue to review". Everyone else is invited from the
+   overlay's sidebar by an owner or team member.
+
+3. POCKETBASE ADMIN UI (superuser)
+   Not on {{ .Values.host }} (Caddy answers 404). Port-forward the pod:
+
+     kubectl port-forward deploy/{{ include "c11n.fullname" . }} 8090:8090
+     # then http://127.0.0.1:8090/_/
+
+{{ if .Values.backup.cron -}}
+4. BACKUPS
+   Scheduled: "{{ .Values.backup.cron }}" -> s3://{{ .Values.backup.s3.bucket }} (keep {{ .Values.backup.keep }}).
+   Restore is manual - see docs/runbook.md.
+{{- else -}}
+4. BACKUPS
+   Off (backup.cron is empty). See docs/runbook.md to enable them or to take a
+   manual backup from the admin UI.
+{{- end }}
+{{ if .Values.adminIngress.enabled -}}
+
+WARNING: adminIngress is ON - the superuser UI is published at
+https://{{ .Values.adminIngress.host }}/_/ . Turn it off when you are done.
+{{- end }}

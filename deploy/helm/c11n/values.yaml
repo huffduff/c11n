@@ -1,0 +1,189 @@
+# c11n chart values.
+#
+# One release = one reviewed site (ADR 0005). Everything that differs between
+# environments is here; the templates hardcode no host, class, issuer, storage
+# class, image or credential.
+#
+# Minimum to install:
+#
+#   host: review.example.com
+#   upstream.url: https://staging.example.com
+#   owner.email: owner@example.com
+#
+# Everything else has a working default. See docs/runbook.md.
+
+# ---- naming ----------------------------------------------------------------
+nameOverride: ""
+fullnameOverride: ""
+
+# ---- the reviewed site -----------------------------------------------------
+# The host reviewers use. Required: it is the ingress host AND (unless
+# publicUrl is set) the origin invite links are built from.
+host: ""
+
+# Absolute origin used in invite links. Defaults to <scheme>://<host>, where
+# the scheme is https - except when tls.mode=none AND cookie.secure=false,
+# which is the only case where the deployment provably speaks plain http. Set
+# it explicitly when TLS terminates somewhere this chart cannot see (e.g. a
+# CDN in front of a tls.mode=none ingress on http).
+publicUrl: ""
+
+ingress:
+  # k3s/Traefik: "traefik". ingress-nginx: "nginx". Empty = the cluster default.
+  className: ""
+  # Extra annotations for the review-host Ingress (proxy-body-size, timeouts,
+  # a WAF hook, ...). cert-manager's cluster-issuer annotation is added by the
+  # chart when tls.mode=certManager.
+  annotations: {}
+
+tls:
+  # How TLS for the REVIEW host is terminated (ADR 0005):
+  #   certManager    - annotate the Ingress for cert-manager and let it fill a
+  #                    Secret (tls.issuer required; secretName defaults to
+  #                    <host>-tls)
+  #   existingSecret - the operator already has a Secret (tls.secretName
+  #                    required; must contain the host's certificate)
+  #   none           - no TLS block; TLS is terminated upstream of the cluster
+  #                    (or there is none, which is a test setup)
+  mode: certManager
+  issuer: letsencrypt-prod
+  secretName: ""
+
+# ---- the upstream under review --------------------------------------------
+upstream:
+  # REQUIRED. Reachable from the caddy container. http:// or https://.
+  url: ""
+  # verify   - normal certificate verification (default)
+  # insecure - skip verification, for a self-signed https upstream. Caddy
+  #            rejects this for a plain-http upstream, so leave it at verify
+  #            unless the upstream is https with a certificate we cannot check.
+  tls: verify
+
+# ---- identity (ADR 0006) ---------------------------------------------------
+owner:
+  # REQUIRED. The first owner, created on the first request against a fresh
+  # database; its one-time sign-in link is printed to the pocketbase log
+  # (see NOTES.txt). Empty is refused at render time.
+  email: ""
+
+session:
+  # Session cookie lifetime in days (C11N_SESSION_TTL_DAYS, 1..30).
+  ttlDays: 14
+
+invite:
+  # Invite link lifetime in hours (C11N_LINK_TTL_HOURS, 1..168).
+  ttlHours: 72
+  # Invites a team member may mint per hour (C11N_INVITE_RATE_PER_HOUR,
+  # 1..10000). The server default is 30.
+  ratePerHour: 30
+
+cookie:
+  # Mark the session cookie Secure. Keep true: even with tls.mode=none the
+  # operator may terminate TLS upstream, and a Secure cookie is the safe
+  # default. Set false ONLY for a plain-http host that is not localhost -
+  # browsers then refuse to store the cookie and every sign-in fails silently.
+  # It also feeds the publicUrl scheme default (see above).
+  secure: true
+
+# ---- images ----------------------------------------------------------------
+# Both default to GHCR and to the chart's appVersion, so a release tag installs
+# the pair of images built for it (see .github/workflows/release.yml).
+caddy:
+  image:
+    repository: ghcr.io/huffduff/c11n-caddy
+    # Empty = .Chart.AppVersion.
+    tag: ""
+pocketbase:
+  image:
+    repository: ghcr.io/huffduff/c11n-pocketbase
+    tag: ""
+
+image:
+  # Always IfNotPresent: a moving tag would silently re-pull a different image
+  # into a running review site.
+  pullPolicy: IfNotPresent
+
+imagePullSecrets: []
+
+# ---- storage ---------------------------------------------------------------
+persistence:
+  # Empty = the cluster's default StorageClass.
+  #
+  # Use a RWO BLOCK storage class (local-path, EBS, ...), never NFS: SQLite
+  # relies on POSIX locks and fsync semantics that network filesystems get
+  # wrong and that show up as corruption, not as an error.
+  storageClass: ""
+  size: 10Gi
+
+# ---- placement and sizing --------------------------------------------------
+# Separate resources per container: pocketbase is the one with the data.
+resources:
+  caddy:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+    limits:
+      memory: 256Mi
+  pocketbase:
+    requests:
+      cpu: 50m
+      memory: 128Mi
+    limits:
+      memory: 512Mi
+
+nodeSelector: {}
+tolerations: []
+affinity: {}
+
+podAnnotations: {}
+
+# ---- scheduled S3 backups (PocketBase settings.backups) -------------------
+# Applied at boot from these values by pb_hooks/settings.pb.js. Disabled
+# unless backup.cron is non-empty. This is PocketBase's own S3 backup
+# machinery: it uploads a zip of pb_data on the cron schedule and prunes to
+# backup.keep. It does NOT restore - see docs/runbook.md.
+backup:
+  # Standard 5-field cron, e.g. "0 3 * * *" for 03:00 daily. Empty = off.
+  cron: ""
+  # How many backups to keep in the bucket.
+  keep: 14
+  s3:
+    endpoint: ""
+    bucket: ""
+    region: ""
+    # Rendered into a chart-managed Secret, never into the Deployment. Note
+    # that Helm also stores the release values in a Secret in the release
+    # namespace, so these are only as private as the cluster's Secret access.
+    accessKey: ""
+    secretKey: ""
+    # Required by MinIO and most non-AWS S3 implementations.
+    forcePathStyle: false
+
+# ---- SMTP (POST-MVP: inert) ------------------------------------------------
+# Wired into the environment for the day PocketBase sends invite mail, but
+# NOTHING reads these yet: invites are copy-the-link only (ADR 0006, MVP
+# scope). Setting them changes no behaviour. pb_hooks do not apply them.
+smtp:
+  enabled: false
+  host: ""
+  port: 587
+  username: ""
+  password: ""
+  from: ""
+  # STARTTLS/implicit TLS for the eventual PocketBase settings.smtp.
+  tls: true
+  # Set false only for a local mail catcher on a trusted network.
+  authEnabled: true
+
+# ---- PocketBase admin UI ---------------------------------------------------
+# The admin UI is NOT on the review host (Caddy answers 404 for /__c11n/pb/_/*).
+# Leave this off and use the port-forward in NOTES.txt. Enabling it publishes
+# the superuser login on a real hostname: anyone who guesses the admin path can
+# brute-force it, so it needs its own TLS, IP allowlist or auth proxy. The
+# warning is repeated in the rendered object's annotation.
+adminIngress:
+  enabled: false
+  host: ""
+  # Empty = ingress.className.
+  className: ""
+  annotations: {}

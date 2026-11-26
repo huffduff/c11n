@@ -1,0 +1,19 @@
+apiVersion: v2
+name: c11n
+description: >-
+  One stakeholder-review proxy for one reviewed site: Caddy (overlay bundle,
+  sign-in page, forward_auth gate, upstream proxy) and PocketBase in one pod,
+  with a PVC for pb_data. One release per reviewed site (ADR 0005).
+type: application
+# Chart version: bumped when the chart changes. appVersion is the IMAGE TAG
+# both containers default to, so cut it in step with the release tag (5.2).
+version: 0.1.0
+appVersion: "0.1.0"
+kubeVersion: ">=1.25.0-0"
+home: https://github.com/huffduff/c11n
+sources:
+  - https://github.com/huffduff/c11n
+maintainers:
+  - name: huffduff
+annotations:
+  c11n.io/adr: "ADR 0005 - one k8s deployment per reviewed site"

@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto'
 import { expect, test, type APIRequestContext } from '@playwright/test'
 import {
+  EXTERNAL,
   bootstrapInviteLink,
   claimInvite,
   createUser,
@@ -37,7 +38,10 @@ function sha256(value: string): string {
   return createHash('sha256').update(value).digest('hex')
 }
 
-const MAGIC_PREFIX = 'http://127.0.0.1:18080/__c11n/auth/#t='
+// Invite links are absolute and built from C11N_PUBLIC_URL, which is the same
+// origin the suite is pointed at (the local stack's :18080, or whatever
+// C11N_E2E_BASE_URL names in external mode).
+const MAGIC_PREFIX = `${readCreds().baseUrl}/__c11n/auth/#t=`
 
 /** A unique invitee email per call (users.email is unique). */
 let inviteSeq = 0
@@ -59,6 +63,12 @@ async function freshInvite(
 }
 
 test.describe('3.2 bootstrap owner', () => {
+  // The bootstrap link is printed to the POD's stdout on a cluster; the suite
+  // has no access to it (docs/runbook.md has the kubectl line). The owner's
+  // existence and the invite row's shape are still covered by 3.3 below, which
+  // mints its own owner.
+  test.skip(EXTERNAL, 'the bootstrap line is in the cluster log, not a local file')
+
   test('a fresh stack logs a one-time owner invite link', () => {
     const invite = bootstrapInviteLink()
     expect(invite.email).toBe('owner@c11n.test')
@@ -327,7 +337,7 @@ test.describe('3.4 magic-link claim', () => {
   })
 
   test('an unknown token is refused and says nothing else', async ({ request }) => {
-    const base = 'http://127.0.0.1:18080/__c11n/auth/'
+    const base = `${readCreds().baseUrl}/__c11n/auth/`
     const claimed = await claimInvite(request, `${base}#t=${'A'.repeat(43)}`)
     expect(claimed.status).toBe(410)
     expect(claimed.setCookie).toBeUndefined()

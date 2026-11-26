@@ -1,5 +1,6 @@
 import { expect, test, type Browser, type Page } from '@playwright/test'
 import {
+  EXTERNAL,
   bootstrapInviteLink,
   invitesFor,
   listComments,
@@ -76,9 +77,14 @@ test.describe('Phase 3 exit flow', () => {
       // order-independent.
       const owner = (await userByEmail('owner@c11n.test'))!
       const unused = (await invitesFor(owner.email)).find((row) => !row.usedAt)
-      const ownerLink = unused
-        ? bootstrapInviteLink().link
-        : await magicLinkFor(owner.email, 'owner')
+      // External mode has no local log to read the bootstrap link from, so
+      // always mint a fresh owner link there (invites are single use; minting
+      // another for the same account is the documented recovery path).
+      const ownerLink = EXTERNAL
+        ? await magicLinkFor(owner.email, 'owner')
+        : unused
+          ? bootstrapInviteLink().link
+          : await magicLinkFor(owner.email, 'owner')
 
       const asOwner = await openAs(browser, ownerLink)
       open.push(asOwner)

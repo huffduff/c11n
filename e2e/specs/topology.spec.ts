@@ -1,5 +1,5 @@
 import { expect, test } from '@playwright/test'
-import { GO_PORT, createUser, sessionCookie, signInAs } from '../fixtures'
+import { EXTERNAL, GO_PORT, createUser, sessionCookie, signInAs } from '../fixtures'
 
 /**
  * Topology specs: the same proxy, two different upstreams.
@@ -47,6 +47,10 @@ test.describe('go-served production topology', () => {
   })
 
   test('a gzip-accepting HTML request is still rewritten', async ({ request }) => {
+    // The direct-to-upstream half talks to 127.0.0.1:<GO_PORT>, which exists
+    // only in the local stack. In external mode the deployment's upstream is
+    // inside the cluster, so only the through-the-proxy half can run.
+    test.skip(EXTERNAL, 'the upstream port is not reachable in external mode')
     // Caddy sends `header_up Accept-Encoding identity` upstream precisely
     // because a compressed body would make the `</head>` replace silently do
     // nothing. The fixture gzips whenever it is asked to, so this request

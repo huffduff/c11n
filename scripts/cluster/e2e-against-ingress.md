@@ -108,12 +108,11 @@ two hangs, add the node subnet to `networkPolicy.additionalAllowedCidrs`, or
 re-install with `scripts/cluster/install-closedcloud.sh NETWORK_POLICY=0`.
 
 **Ingress, not port-forward:** on k3s/closedcloud Traefik runs with
-`hostNetwork: true`, so its requests arrive from the node IP and the chart's
-`namespaceSelector` cannot match them — the caddy policy 502s every request
-with both pods Ready. `install-closedcloud.sh` detects this and passes the
-nodes' InternalIPs (/32) as `additionalAllowedCidrs`. If you install by hand,
-check `kubectl -n kube-system get pods -l app.kubernetes.io/name=traefik -o
-jsonpath='{.items[*].spec.hostNetwork}'` and set the node CIDR yourself.
+`hostNetwork: true`, so it has no pod IP and the chart's `namespaceSelector`
+cannot match it — the caddy policy 502s every request with both pods Ready.
+`install-closedcloud.sh` detects this and admits, per node, the InternalIP plus
+the podCIDR network and `.1` addresses as `/32`s (on flannel the traffic arrives
+from those, not from the InternalIP). If you install by hand, see runbook §9.
 
 ### Why a port-forward and not the Traefik hostname
 

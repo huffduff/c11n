@@ -296,11 +296,13 @@ networkPolicy:
   ingressPodSelector: {}
   # Optional extra sources for BOTH policies, as CIDRs. Needed when the
   # ingress controller runs with hostNetwork: true (k3s/closedcloud Traefik,
-  # some bare-metal setups): its traffic arrives with the NODE IP as the
-  # source, which a namespaceSelector can never match, so the caddy policy
-  # blocks it and every request is a 502/504 with both pods Ready. Set this to
-  # the node CIDR or the nodes' InternalIPs (/32), e.g.
-  #   additionalAllowedCidrs: [172.31.0.0/16]
+  # some bare-metal setups): it has no pod IP, so a namespaceSelector can never
+  # match it; the caddy policy blocks it and every request is a 502/504 with
+  # both pods Ready. The source address is CNI-dependent: on k3s/flannel it is
+  # the sending node's podCIDR network address (flannel.1) or .1 (cni0), NOT
+  # the InternalIP. Per node, list InternalIP/32, podCIDR-net/32, podCIDR-.1/32:
+  #   additionalAllowedCidrs: [172.31.1.104/32, 10.42.1.0/32, 10.42.1.1/32]
+  # Never the whole pod CIDR: that admits every pod. See runbook §9.
   # scripts/cluster/install-closedcloud.sh detects hostNetwork and fills this
   # in. Also useful for an external load balancer talking to the nodes.
   additionalAllowedCidrs: []

@@ -399,23 +399,33 @@ caddy, so every request times out or 504s.
    chart's default), `ingress-nginx` on ingress-nginx. Check with
    `kubectl get pods -A | grep -Ei 'traefik|ingress'` and fix the value.
 2. **The controller runs with `hostNetwork: true`.** Traefik on k3s and
-   closedcloud does. A host-network pod sends traffic from the **node IP**, and
-   a `namespaceSelector` cannot match that: the policy's `from` selects pods, and
-   there is no pod IP to select. Every request 502s (Traefik reports the upstream
+   closedcloud does. A host-network pod has no pod IP, so a `namespaceSelector`
+   can never match its traffic. Every request 502s (Traefik reports the upstream
    connect failure) with both pods Ready, and the pocketbase pod's log shows
-   nothing — the packet never reached it. Confirm and fix:
+   nothing — the packet never reached it.
+
+   **The source address the policy sees is CNI-dependent, and it is often not
+   the node InternalIP.** Verified on k3s with flannel VXLAN: Traefik on node A
+   reaching caddy on node B arrives from A's `flannel.1` address (A's podCIDR
+   network address, e.g. `10.42.1.0`); on the same node it arrives from the
+   `cni0` bridge (podCIDR `.1`). InternalIP `/32`s alone still 502'd. Confirm
+   and fix:
 
    ```sh
    kubectl -n kube-system get pods -l app.kubernetes.io/name=traefik \
      -o jsonpath='{.items[*].spec.hostNetwork}'      # "true"
    kubectl get nodes \
      -o jsonpath='{.items[*].status.addresses[?(@.type=="InternalIP")].address}'
-   # then: --set networkPolicy.additionalAllowedCidrs={<ip>/32,<ip>/32}
+   kubectl get nodes -o jsonpath='{.items[*].spec.podCIDR}'
+   # then, per node: InternalIP/32, podCIDR network/32, podCIDR .1/32, e.g.
+   # --set networkPolicy.additionalAllowedCidrs={172.31.1.104/32,10.42.1.0/32,10.42.1.1/32,...}
    ```
 
-   `scripts/cluster/install-closedcloud.sh` does this probe and sets the CIDRs
-   automatically. Use the node CIDR if the node set changes often; a `/32` per
-   node is the tighter default.
+   `scripts/cluster/install-closedcloud.sh` does this probe and sets all three
+   per node automatically. Do NOT use the whole pod CIDR (e.g. `10.42.0.0/16`):
+   that admits every pod in the cluster and defeats the policy. On other CNIs
+   (Calico, Cilium), find the real source with a temporary wide CIDR plus the
+   caddy access log, then narrow it.
 3. **Narrowed pod selector.** If you set `networkPolicy.ingressPodSelector`,
    its labels must match the controller's pods (`kubectl get pods -n <ns>
    --show-labels`).

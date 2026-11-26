@@ -256,10 +256,18 @@ fi
 # exists so a 504 from Traefik can be attributed to the policy in one command.
 #
 # hostNetwork Traefik: the namespaceSelector does not match requests that
-# arrive from the node IP (there is no pod IP for a host-network pod), so the
+# arrive from the node (there is no pod IP for a host-network pod), so the
 # caddy policy has to admit the nodes explicitly. Probe it rather than guess:
 # a wrong guess either leaves the 502 in place or opens the policy wider than
 # the cluster needs.
+#
+# Found on the closedcloud k3s cluster (flannel VXLAN): the node InternalIP is
+# NOT the source address the policy sees. Traefik on node A reaching caddy on
+# node B arrives from A's flannel.1 address (A's podCIDR network address,
+# e.g. 10.42.1.0), and on the same node from the cni0 bridge (podCIDR .1).
+# InternalIP /32s alone still 502'd; adding each node's podCIDR .0 and .1 /32
+# made it 200 while a plain pod in the namespace stayed blocked. So admit all
+# three per node: InternalIP, podCIDR network, podCIDR gateway.
 ingress_is_host_network() {
 	local out
 	out="$(kubectl -n kube-system get pods -l app.kubernetes.io/name=traefik \
@@ -273,6 +281,18 @@ ingress_is_host_network() {
 node_internal_cidrs() {
 	kubectl get nodes \
 		-o jsonpath='{.items[*].status.addresses[?(@.type=="InternalIP")].address}' 2>/dev/null || true
+}
+
+# Each node's podCIDR (IPv4 /24-style), e.g. "10.42.0.0/24 10.42.1.0/24".
+node_pod_cidrs() {
+	kubectl get nodes -o jsonpath='{.items[*].spec.podCIDR}' 2>/dev/null || true
+}
+
+# "10.42.1.0/24" -> "10.42.1.0/32,10.42.1.1/32" (network + first host).
+pod_cidr_gateways() {
+	local net="${1%/*}" a b c d
+	IFS=. read -r a b c d <<<"$net"
+	printf '%s.%s.%s.%s/32,%s.%s.%s.%s/32' "$a" "$b" "$c" "$d" "$a" "$b" "$c" "$((d + 1))"
 }
 
 NETPOL_ARGS=()
@@ -301,7 +321,8 @@ else
 	if [ "$HOST_NETWORK" = 1 ]; then
 		if [ "$DRY_RUN" = 1 ]; then
 			printf '+ kubectl get nodes -o jsonpath={.items[*].status.addresses[?(@.type=="InternalIP")].address}\n' >&2
-			NETPOL_ARGS+=(--set "networkPolicy.additionalAllowedCidrs={<node InternalIP>/32,...}")
+			printf '+ kubectl get nodes -o jsonpath={.items[*].spec.podCIDR}\n' >&2
+			NETPOL_ARGS+=(--set "networkPolicy.additionalAllowedCidrs={<node InternalIP>/32,<podCIDR net>/32,<podCIDR gw>/32,...}")
 		else
 			NODE_IPS="$(node_internal_cidrs)"
 			[ -n "$NODE_IPS" ] || die "the ingress runs with hostNetwork but 'kubectl get nodes' returned no InternalIP; set networkPolicy.additionalAllowedCidrs yourself"
@@ -309,8 +330,12 @@ else
 			for ip in $NODE_IPS; do
 				NODE_CIDRS="${NODE_CIDRS:+$NODE_CIDRS,}$ip/32"
 			done
+			for pc in $(node_pod_cidrs); do
+				case "$pc" in *:*) continue ;; esac # IPv4 only
+				NODE_CIDRS="$NODE_CIDRS,$(pod_cidr_gateways "$pc")"
+			done
 			NETPOL_ARGS+=(--set "networkPolicy.additionalAllowedCidrs={$NODE_CIDRS}")
-			log "ingress: hostNetwork=true; admitting node InternalIPs: $NODE_CIDRS"
+			log "ingress: hostNetwork=true; admitting node addresses: $NODE_CIDRS"
 		fi
 	fi
 fi

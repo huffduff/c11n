@@ -151,6 +151,11 @@ test.describe('3.8 the session gate', () => {
 
   test('a session whose user is gone is refused on the next load', async ({ page }) => {
     const { user } = await signInAs(page)
+    // Leave the overlay first: once the user is gone, the live overlay's own
+    // central-401 handler (any realtime/API call) can navigate to the sign-in
+    // page and abort our goto below (seen as net::ERR_ABORTED in CI). This
+    // spec is about the *next load*, so start it from a blank page.
+    await page.goto('about:blank')
     await deleteUser(user.id)
 
     // The cookie is still in the jar, but the token no longer resolves.

@@ -40,6 +40,8 @@ StatefulSet {{ include "c11n.fullname" . }}-pocketbase (the database, one pod).
    A Service port-forward reaches the (single) pocketbase pod whatever it is
    called. If your CNI filters port-forward traffic under the chart's
    NetworkPolicy - unusual, but CNI-dependent - see docs/runbook.md section 9.
+   For a forward that must survive a rollout, use
+   scripts/cluster/port-forward.sh (it restarts kubectl with a 1 s backoff).
 
 {{ if .Values.backup.cron -}}
 4. BACKUPS

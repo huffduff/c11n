@@ -8,14 +8,17 @@
  *
  * EXTERNAL MODE (C11N_E2E_EXTERNAL=1) does none of that: the deployment under
  * test belongs to somebody else (a real cluster), so there is nothing to wipe
- * and nothing to start. It only checks that the environment is complete and
- * that both endpoints answer, so a typo'd URL fails here with one clear
- * message instead of as forty confusing spec failures.
+ * and nothing to start. It only checks that the environment is complete, that
+ * both endpoints answer, and that the release's publicUrl matches the base URL
+ * the tests use (a claim with a bogus token; see origin-preflight.ts), so a
+ * typo'd URL or a stale publicUrl fails here with one clear message instead of
+ * as forty confusing spec failures.
  */
 import { execFileSync } from 'node:child_process'
 import fs from 'node:fs'
 import path from 'node:path'
 import { destructiveRefusal } from './external-guard'
+import { checkClaimOrigin } from './origin-preflight'
 
 const repoRoot = path.resolve(__dirname, '..')
 const stackScript = path.join(repoRoot, 'scripts', 'stack.sh')
@@ -62,6 +65,10 @@ export default async function globalSetup(): Promise<void> {
     // not a 401 from the gate.
     await probe(`${baseUrl}/__c11n/auth/`, 'the proxy')
     await probe(`${pbUrl}/api/health`, 'PocketBase')
+    // The proxy and the database being up is not enough: the release's
+    // publicUrl has to be THIS base URL or the claim's Origin check 403s every
+    // sign-in. One bogus-token claim tells us that in a second.
+    await checkClaimOrigin(baseUrl)
     console.log(`external mode: ${baseUrl} (PocketBase ${pbUrl}); no local stack is started or wiped`)
     return
   }

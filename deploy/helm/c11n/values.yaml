@@ -268,6 +268,14 @@ adminIngress:
 #   caddy:8080        only from the ingress controller's namespace, plus any
 #                     ingressPodSelector / additionalAllowedCidrs below
 #
+# HOST-NETWORK INGRESS CONTROLLERS (k3s/closedcloud Traefik, some bare-metal
+# setups): if the controller runs with hostNetwork: true, its traffic reaches
+# the pod with the NODE's IP as the source and no namespaceSelector can match
+# it (a policy selects pods, and a host-network pod has no pod IP). The symptom
+# is a 502/504 from the ingress with both pods Ready; the fix is
+# additionalAllowedCidrs set to the node CIDR or the nodes' InternalIPs (/32).
+# scripts/cluster/install-closedcloud.sh detects this and sets it.
+#
 # Egress is NOT restricted: caddy proxies to an arbitrary upstream and
 # pocketbase uploads to an arbitrary S3 endpoint.
 #
@@ -286,8 +294,13 @@ networkPolicy:
   #   ingressPodSelector: { app.kubernetes.io/name: traefik }
   # Empty = any pod in the namespace.
   ingressPodSelector: {}
-  # Optional extra sources for BOTH policies, as CIDRs: an external load
-  # balancer that talks to the nodes, or the node subnet if `kubectl
-  # port-forward` turns out to be filtered by your CNI (port-forward traffic is
-  # usually not subject to NetworkPolicy, but that is CNI-dependent).
+  # Optional extra sources for BOTH policies, as CIDRs. Needed when the
+  # ingress controller runs with hostNetwork: true (k3s/closedcloud Traefik,
+  # some bare-metal setups): its traffic arrives with the NODE IP as the
+  # source, which a namespaceSelector can never match, so the caddy policy
+  # blocks it and every request is a 502/504 with both pods Ready. Set this to
+  # the node CIDR or the nodes' InternalIPs (/32), e.g.
+  #   additionalAllowedCidrs: [172.31.0.0/16]
+  # scripts/cluster/install-closedcloud.sh detects hostNetwork and fills this
+  # in. Also useful for an external load balancer talking to the nodes.
   additionalAllowedCidrs: []

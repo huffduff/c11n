@@ -38,16 +38,13 @@ spec:
         annotation named checksum/config is replaced rather than emitted twice
         (a duplicate key is rejected by the YAML parser before the object exists).
 
-        The checksum covers ONLY the values caddy consumes. It used to hash the
-        whole .Values, which meant changing owner.email or a backup bucket
-        rolled the proxy for nothing; now a PocketBase-only change restarts
-        PocketBase alone (and vice versa).
+        The checksum covers ONLY the values caddy consumes. Its whole runtime
+        configuration is C11N_UPSTREAM / C11N_UPSTREAM_TLS plus the image; host,
+        publicUrl, tls.mode and cookie.secure change the Ingress or PocketBase,
+        never this pod, so they are deliberately absent. Changing any of them
+        must not roll the proxy (check-chart proves it).
         */}}
         {{- $config := dict
-              "host" .Values.host
-              "publicUrl" .Values.publicUrl
-              "tlsMode" .Values.tls.mode
-              "cookieSecure" .Values.cookie.secure
               "upstream" .Values.upstream
               "image" .Values.caddy.image }}
         {{- $annotations := deepCopy (.Values.podAnnotations | default dict) }}

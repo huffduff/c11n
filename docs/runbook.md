@@ -85,7 +85,10 @@ It creates a `c11n-caddy` Deployment and a `c11n-pocketbase` StatefulSet whose
 claim (`pb-data-c11n-pocketbase-0`) is created empty on first boot. The
 NetworkPolicy is on: leave `networkPolicy.ingressNamespace` at `kube-system` on
 k3s/Traefik, set it to `ingress-nginx` on ingress-nginx, or the review host
-answers 504 (see §9).
+answers 504 (see §9). If the controller runs with `hostNetwork: true` (Traefik
+on k3s and closedcloud does), also set `networkPolicy.additionalAllowedCidrs`
+to the node CIDR / InternalIPs — otherwise the policy 502s it. The cluster
+install script detects that case and does it for you.
 
 Three values are required and the render fails without them (by design, with a
 message naming the value): `host`, `upstream.url`, `owner.email`.
@@ -105,7 +108,7 @@ Where the environment differs, it is a value — nothing is hardcoded:
 | backups | `backup.cron`, `backup.keep`, `backup.s3.*` |
 | mail (inert until post-MVP) | `smtp.*` |
 | admin UI exposure | `adminIngress.enabled` (default false), `adminIngress.host` |
-| network policy | `networkPolicy.enabled` (default **true**), `networkPolicy.ingressNamespace` (default `kube-system`), `networkPolicy.ingressPodSelector`, `networkPolicy.additionalAllowedCidrs` |
+| network policy | `networkPolicy.enabled` (default **true**), `networkPolicy.ingressNamespace` (default `kube-system`), `networkPolicy.ingressPodSelector`, `networkPolicy.additionalAllowedCidrs` (required for a `hostNetwork` ingress controller) |
 | caddy scaling | `caddy.replicas` (default 1), `caddy.pdb.enabled` (default false) |
 | per-component sizing / placement | `caddy.resources`, `caddy.nodeSelector`, `caddy.tolerations`, `caddy.affinity` and the `pocketbase.*` equivalents (empty = the top-level value) |
 
@@ -169,9 +172,14 @@ sign-in page (and 401/502 for gated routes) while it boots.
 
 | What changed | What rolls | Outage |
 |---|---|---|
-| `caddy.*`, `upstream.*`, `host`, `publicUrl`, `cookie.secure` | the caddy Deployment only (its `checksum/config` moves) | none: `maxUnavailable: 0` adds the new pod first, and readiness only needs the ungated sign-in page |
-| `owner.*`, `session.*`, `invite.*`, `backup.*`, `smtp.*`, `pocketbase.image` | the pocketbase StatefulSet only | **seconds to a couple of minutes**: the pod is deleted (a StatefulSet deletes before it creates), migrations run at boot, readiness returns. Gated pages get 401/502 meanwhile; the sign-in page itself still loads |
+| `caddy.*`, `upstream.*`, `caddy.image` | the caddy Deployment only (its `checksum/config` moves) | none: `maxUnavailable: 0` adds the new pod first, and readiness only needs the ungated sign-in page |
+| `owner.*`, `session.*`, `invite.*`, `backup.*`, `smtp.*`, `cookie.secure`, `publicUrl`, `pocketbase.image` | the pocketbase StatefulSet only (and the review Ingress when `host`/`publicUrl` changed) | **seconds to a couple of minutes**: the pod is deleted (a StatefulSet deletes before it creates), migrations run at boot, readiness returns. Gated pages get 401/502 meanwhile; the sign-in page itself still loads |
+| `tls.*`, `ingress.*`, `adminIngress.*`, `networkPolicy.*` | only the Ingress / NetworkPolicy objects | none: no pod template changes |
 | `resources` / `nodeSelector` / `tolerations` / `affinity` | whichever pod spec changed | as above for that pod |
+
+Each workload's `checksum/config` hashes only the values that workload reads, so
+a `publicUrl`/`cookie.secure` edit does not restart caddy (and does not kill a
+port-forward pinned to it). `scripts/check-chart.mjs` asserts this.
 
 ```sh
 # 1. new images exist (a v* tag builds both)
@@ -390,21 +398,42 @@ caddy, so every request times out or 504s.
    namespace the controller's *pods* run in — `kube-system` on k3s/Traefik (the
    chart's default), `ingress-nginx` on ingress-nginx. Check with
    `kubectl get pods -A | grep -Ei 'traefik|ingress'` and fix the value.
-2. **Narrowed pod selector.** If you set `networkPolicy.ingressPodSelector`,
+2. **The controller runs with `hostNetwork: true`.** Traefik on k3s and
+   closedcloud does. A host-network pod sends traffic from the **node IP**, and
+   a `namespaceSelector` cannot match that: the policy's `from` selects pods, and
+   there is no pod IP to select. Every request 502s (Traefik reports the upstream
+   connect failure) with both pods Ready, and the pocketbase pod's log shows
+   nothing — the packet never reached it. Confirm and fix:
+
+   ```sh
+   kubectl -n kube-system get pods -l app.kubernetes.io/name=traefik \
+     -o jsonpath='{.items[*].spec.hostNetwork}'      # "true"
+   kubectl get nodes \
+     -o jsonpath='{.items[*].status.addresses[?(@.type=="InternalIP")].address}'
+   # then: --set networkPolicy.additionalAllowedCidrs={<ip>/32,<ip>/32}
+   ```
+
+   `scripts/cluster/install-closedcloud.sh` does this probe and sets the CIDRs
+   automatically. Use the node CIDR if the node set changes often; a `/32` per
+   node is the tighter default.
+3. **Narrowed pod selector.** If you set `networkPolicy.ingressPodSelector`,
    its labels must match the controller's pods (`kubectl get pods -n <ns>
    --show-labels`).
-3. **The controller is outside the cluster** (a load balancer talking to node
+4. **The controller is outside the cluster** (a load balancer talking to node
    ports): add its CIDR to `networkPolicy.additionalAllowedCidrs`.
-4. Prove it is the policy: `helm upgrade … --reuse-values --set
+5. Prove it is the policy: `helm upgrade … --reuse-values --set
    networkPolicy.enabled=false`, retry, and re-enable once the source is known.
    The policies are ingress-only, so DNS and the upstream are never affected.
-5. A CNI without a policy controller ignores the object entirely — the site
+6. A CNI without a policy controller ignores the object entirely — the site
    then works and the policy protects nothing. Check the CNI, not the chart.
 
 `kubectl port-forward` traffic is usually outside the policy (it is SNAT'd by
 the kubelet), which is why the NOTES.txt port-forwards normally keep working
 with the policy on. That is CNI-dependent: if a port-forward hangs, add the node
-subnet to `additionalAllowedCidrs` or disable the policy.
+subnet to `additionalAllowedCidrs` or disable the policy. Use
+`scripts/cluster/port-forward.sh <target> <port:port>` rather than a bare
+`kubectl port-forward` when a rollout is expected: the bare command is pinned to
+one pod and dies (`failed to find sandbox`) when that pod is replaced.
 
 ### 502/503 from the ingress
 
@@ -418,7 +447,10 @@ kubectl exec deploy/c11n-caddy -c caddy -- wget -qO- --spider <upstream.url>
 ```
 
 A 502 that starts the moment a pocketbase upgrade begins and clears when its pod
-is Ready is the expected window (§4), not a fault.
+is Ready is the expected window (§4), not a fault. A 502 that *never* clears,
+with both pods Ready and nothing in the pocketbase log, is the hostNetwork
+ingress case described in the 504 section above: the request is being dropped
+before it reaches caddy's pod, so add the node CIDRs.
 
 ### Upstream TLS errors
 

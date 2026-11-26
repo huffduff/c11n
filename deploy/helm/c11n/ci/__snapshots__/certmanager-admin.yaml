@@ -237,7 +237,7 @@ spec:
         app.kubernetes.io/instance: c11n
         app.kubernetes.io/component: caddy
       annotations:
-        checksum/config: 31547ef0515cf29e8b1c4aba6c443c962906e27ea08adbb62f6ee95e293eaf65
+        checksum/config: ba6ba77aef634be27bf676564f0dc6af234a960e52a0ba5c4cd26f1d0ce3ab04
     spec:
       # Nothing in this pod talks to the Kubernetes API, so it has no token to
       # misuse if a container is compromised.

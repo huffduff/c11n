@@ -29,6 +29,11 @@ CAVEATS (both documented in docs/runbook.md §9):
     on most CNIs. It is CNI-dependent: if a port-forward hangs with the policy
     on, add the node subnet to networkPolicy.additionalAllowedCidrs or turn
     the policy off.
+  * A HOST-NETWORK controller (hostNetwork: true, as Traefik runs on k3s and
+    closedcloud) arrives from the NODE's IP, not from a pod IP, so the
+    namespace selector above does not match it and every request 502s with
+    both pods Ready. networkPolicy.additionalAllowedCidrs must then contain
+    the node CIDR / InternalIPs; install-closedcloud.sh detects and sets it.
   * The namespace match is on the kubernetes.io/metadata.name label, which
     Kubernetes sets automatically on every namespace. k3s runs Traefik in
     kube-system (the default); ingress-nginx runs in ingress-nginx - a wrong

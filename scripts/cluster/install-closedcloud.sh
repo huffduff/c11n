@@ -19,6 +19,14 @@
 # is where Traefik runs on k3s. If you move the controller, either set
 # NETWORK_POLICY=0 or the review URL 504s with both pods Ready.
 #
+# HOST-NETWORK INGRESS: Traefik on k3s/closedcloud runs with hostNetwork: true,
+# so its requests reach caddy from the NODE's IP. A namespaceSelector cannot
+# match that (host-network pods have no pod IP), and the caddy policy would 502
+# every request with both pods Ready. This script probes the Traefik pod's
+# spec.hostNetwork and, when true, passes the nodes' InternalIPs (/32) as
+# networkPolicy.additionalAllowedCidrs. DRY_RUN prints the probe instead of
+# running it; INGRESS_HOST_NETWORK=1/0 overrides the answer.
+#
 # IMAGES ARE PINNED BY DIGEST when `closedcloud build` returns one, and the tag
 # carries an epoch otherwise: a bare short sha is a moving tag, so a rebuild of
 # the same commit used to be silently ignored (IfNotPresent).
@@ -29,9 +37,10 @@
 #   * it never runs `closedcloud up`, `down` or `scale`: the cluster's lifetime
 #     belongs to the operator (and this session's cluster is torn down when the
 #     session ends).
-#   * it never touches TLS: tls.mode=none + cookie.secure=false is deliberate,
-#     because Traefik here serves plain http on port 80 and a Secure cookie
-#     would be dropped by the browser on http://<address>.
+#   * it never touches TLS: tls.mode=none is deliberate, because Traefik here
+#     serves plain http on port 80. cookie.secure=false matches that for a real
+#     hostname; E2E_PORT_FORWARD=1 sets cookie.secure=true instead, because the
+#     tests come in over 127.0.0.1, which Chromium treats as a secure context.
 #
 # PREREQUISITES:
 #   * KUBECONFIG is set (closedcloud up wrote it), kubectl and helm on PATH,
@@ -52,6 +61,13 @@
 #   NETWORK_POLICY=0 disables the chart's NetworkPolicy (default: 1, on). Use it
 #     only to prove a suspected policy problem (a 504 with both pods Ready), or
 #     if `kubectl port-forward` turns out to be filtered by this cluster's CNI.
+#   E2E_PORT_FORWARD=1 installs for scripts/cluster/e2e-against-ingress.md:
+#     publicUrl=http://127.0.0.1:18080 (the base URL the suite uses) and
+#     cookie.secure=true. The claim's Origin check compares Origin to
+#     publicUrl, so a mismatch 403s every sign-in; this mode is what makes the
+#     port-forward run work rather than 40 confusing failures.
+#   INGRESS_HOST_NETWORK=1|0 forces the hostNetwork answer instead of probing
+#     the cluster (useful in DRY_RUN, where the probe is only printed).
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -67,6 +83,8 @@ DRY_RUN="${DRY_RUN:-0}"
 SKIP_BUILD="${SKIP_BUILD:-0}"
 ADMIN_INGRESS="${ADMIN_INGRESS:-0}"
 NETWORK_POLICY="${NETWORK_POLICY:-1}"
+E2E_PORT_FORWARD="${E2E_PORT_FORWARD:-0}"
+INGRESS_HOST_NETWORK="${INGRESS_HOST_NETWORK:-}"
 # Helm's fullname: the release name when it already contains the chart name,
 # <release>-c11n otherwise. Both workloads are named from it, so the log and
 # rollout commands below cannot guess wrong for a RELEASE= override.
@@ -236,22 +254,90 @@ fi
 # The NetworkPolicy is on by default and k3s enforces it (Traefik is in
 # kube-system, which is the chart's default ingressNamespace). The escape hatch
 # exists so a 504 from Traefik can be attributed to the policy in one command.
+#
+# hostNetwork Traefik: the namespaceSelector does not match requests that
+# arrive from the node IP (there is no pod IP for a host-network pod), so the
+# caddy policy has to admit the nodes explicitly. Probe it rather than guess:
+# a wrong guess either leaves the 502 in place or opens the policy wider than
+# the cluster needs.
+ingress_is_host_network() {
+	local out
+	out="$(kubectl -n kube-system get pods -l app.kubernetes.io/name=traefik \
+		-o jsonpath='{.items[*].spec.hostNetwork}' 2>/dev/null || true)"
+	case "$out" in
+	*true*) return 0 ;;
+	*) return 1 ;;
+	esac
+}
+
+node_internal_cidrs() {
+	kubectl get nodes \
+		-o jsonpath='{.items[*].status.addresses[?(@.type=="InternalIP")].address}' 2>/dev/null || true
+}
+
 NETPOL_ARGS=()
 if [ "$NETWORK_POLICY" != 1 ]; then
 	NETPOL_ARGS+=(--set "networkPolicy.enabled=false")
+else
+	HOST_NETWORK="$INGRESS_HOST_NETWORK"
+	if [ "$DRY_RUN" = 1 ]; then
+		# Never query the cluster in a dry run; print exactly what the real run
+		# would execute, so the probe can be run by hand.
+		printf '+ kubectl -n kube-system get pods -l app.kubernetes.io/name=traefik -o jsonpath={.items[*].spec.hostNetwork}\n' >&2
+		if [ -z "$HOST_NETWORK" ]; then
+			printf '  # dry run: cluster not queried. If that prints true, the real run also sets\n' >&2
+			printf '  # networkPolicy.additionalAllowedCidrs to the nodes InternalIPs (/32):\n' >&2
+			printf '+ kubectl get nodes -o jsonpath={.items[*].status.addresses[?(@.type=="InternalIP")].address}\n' >&2
+		fi
+	elif [ -z "$HOST_NETWORK" ]; then
+		if ingress_is_host_network; then
+			HOST_NETWORK=1
+		else
+			HOST_NETWORK=0
+		fi
+		log "ingress: hostNetwork=$HOST_NETWORK"
+	fi
+
+	if [ "$HOST_NETWORK" = 1 ]; then
+		if [ "$DRY_RUN" = 1 ]; then
+			printf '+ kubectl get nodes -o jsonpath={.items[*].status.addresses[?(@.type=="InternalIP")].address}\n' >&2
+			NETPOL_ARGS+=(--set "networkPolicy.additionalAllowedCidrs={<node InternalIP>/32,...}")
+		else
+			NODE_IPS="$(node_internal_cidrs)"
+			[ -n "$NODE_IPS" ] || die "the ingress runs with hostNetwork but 'kubectl get nodes' returned no InternalIP; set networkPolicy.additionalAllowedCidrs yourself"
+			NODE_CIDRS=""
+			for ip in $NODE_IPS; do
+				NODE_CIDRS="${NODE_CIDRS:+$NODE_CIDRS,}$ip/32"
+			done
+			NETPOL_ARGS+=(--set "networkPolicy.additionalAllowedCidrs={$NODE_CIDRS}")
+			log "ingress: hostNetwork=true; admitting node InternalIPs: $NODE_CIDRS"
+		fi
+	fi
+fi
+
+# The public origin the claim's CSRF check compares the browser's Origin to.
+# Normal installs use the Traefik hostname; E2E_PORT_FORWARD=1 uses the exact
+# base URL scripts/cluster/e2e-against-ingress.md connects to. 127.0.0.1 is a
+# secure context for Chromium, so the cookie can (and must, for identity.spec)
+# keep Secure.
+PUBLIC_URL="http://$HOST"
+COOKIE_SECURE="false"
+if [ "$E2E_PORT_FORWARD" = 1 ]; then
+	PUBLIC_URL="http://127.0.0.1:18080"
+	COOKIE_SECURE="true"
 fi
 
 run helm upgrade --install "$RELEASE" "$REPO_ROOT/deploy/helm/c11n" \
 	--namespace "$NAMESPACE" --create-namespace \
 	--wait --timeout 10m \
 	--set "host=$HOST" \
-	--set "publicUrl=http://$HOST" \
+	--set "publicUrl=$PUBLIC_URL" \
 	--set "upstream.url=$UPSTREAM_URL" \
 	--set "upstream.tls=verify" \
 	--set "owner.email=$OWNER_EMAIL" \
 	--set "ingress.className=traefik" \
 	--set "tls.mode=none" \
-	--set "cookie.secure=false" \
+	--set "cookie.secure=$COOKIE_SECURE" \
 	--set "persistence.storageClass=gp3" \
 	--set "persistence.size=1Gi" \
 	"${IMAGE_ARGS[@]}" \
@@ -298,21 +384,25 @@ if [ "$DRY_RUN" = 1 ]; then
 	printf 'DRY RUN: nothing was built or installed. Re-run without DRY_RUN=1.\n'
 	printf '\nOn the cluster the owner link is:\n'
 	printf "  kubectl logs statefulset/%s-pocketbase -n %s -c pocketbase | grep 'c11n bootstrap'\n" "$FULLNAME" "$NAMESPACE"
-	printf '\nAnd the two port-forwards (different objects, so two commands):\n'
-	printf "  kubectl port-forward deploy/%s-caddy -n %s 18080:8080\n" "$FULLNAME" "$NAMESPACE"
-	printf "  kubectl port-forward svc/%s-pocketbase -n %s 18090:8090\n" "$FULLNAME" "$NAMESPACE"
+	printf '\nAnd the two port-forwards (scripts/cluster/port-forward.sh keeps them alive\nacross a rollout; different objects, so two commands):\n'
+	printf "  scripts/cluster/port-forward.sh deploy/%s-caddy 18080:8080\n" "$FULLNAME"
+	printf "  scripts/cluster/port-forward.sh svc/%s-pocketbase 18090:8090\n" "$FULLNAME"
 	exit 0
 fi
 
 printf 'c11n installed: %s\n' "$RELEASE"
 printf '  review URL:  http://%s/  (via Traefik at the cluster address)\n' "$HOST"
+if [ "$E2E_PORT_FORWARD" = 1 ]; then
+	printf '  e2e:         external mode configured for http://127.0.0.1:18080 (cookie.secure=true)\n'
+	printf '               scripts/cluster/e2e-against-ingress.md\n'
+fi
 if [ "$ADMIN_INGRESS" = 1 ]; then
 	printf '  admin UI:    http://%s/_/  (ADMIN_INGRESS=1; prefer a port-forward in real use)\n' "$ADMIN_HOST"
 else
 	printf '  admin UI:    not published (ADMIN_INGRESS=0); use the port-forward below\n'
 fi
-printf '  port-forward (review):     kubectl port-forward deploy/%s-caddy -n %s 18080:8080\n' "$FULLNAME" "$NAMESPACE"
-printf '  port-forward (pocketbase): kubectl port-forward svc/%s-pocketbase -n %s 18090:8090\n' "$FULLNAME" "$NAMESPACE"
+printf '  port-forward (review):     scripts/cluster/port-forward.sh deploy/%s-caddy 18080:8080\n' "$FULLNAME"
+printf '  port-forward (pocketbase): scripts/cluster/port-forward.sh svc/%s-pocketbase 18090:8090\n' "$FULLNAME"
 printf '  network policy: %s (ingressNamespace=kube-system)\n' "$([ "$NETWORK_POLICY" = 1 ] && printf 'ON (default)' || printf 'OFF (NETWORK_POLICY=0)')"
 printf '\n'
 if link_line="$(owner_link)"; then

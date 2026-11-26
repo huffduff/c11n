@@ -32,7 +32,27 @@ server, so the `go` topology specs apply.
 
 ## 1. Prerequisites
 
-- The release is installed: `scripts/cluster/install-closedcloud.sh`.
+- The release is installed **for these tests**:
+
+  ```
+  E2E_PORT_FORWARD=1 scripts/cluster/install-closedcloud.sh
+  ```
+
+  That mode sets `publicUrl=http://127.0.0.1:18080` and `cookie.secure=true`.
+  Both are required, and both are easy to get wrong:
+
+  - The claim's CSRF check compares the browser's `Origin` to the release's
+    `publicUrl` (`C11N_PUBLIC_URL`). Installed for the Traefik hostname, every
+    sign-in through the port-forward is refused with 403
+    `cross-origin claim refused` — correct behaviour, wrong configuration.
+  - `cookie.secure=false` (the normal plain-http install) makes
+    `identity.spec.ts` fail its `Secure` cookie assertion. `127.0.0.1` is a
+    secure context for Chromium, so a Secure cookie works over the
+    port-forward; the Traefik hostname on plain http is what needs
+    `cookie.secure=false`.
+
+  If you already installed the normal way, re-run with `E2E_PORT_FORWARD=1`
+  (the pocketbase pod restarts, because `C11N_PUBLIC_URL` is read at boot).
 - `kubectl` reaches the cluster (`KUBECONFIG` set) and the release is `c11n` in
   namespace `default` (override below if not).
 
@@ -59,12 +79,20 @@ Two different origins are needed, because the fixtures talk to PocketBase
 test (the proxy overwrites Authorization with the session cookie, by design).
 
 They are two different objects now (a Deployment for the proxy, a Service for the
-database), so it is two commands, in two shells:
+database), so it is two commands, in two shells. Use the wrapper, not a bare
+`kubectl port-forward`: a rollout replaces the pod the forward is pinned to and
+the plain command dies with `failed to find sandbox`, failing the run half way
+through. The wrapper restarts it with a 1 s backoff:
 
 ```
-kubectl port-forward deploy/c11n-caddy 18080:8080
-kubectl port-forward svc/c11n-pocketbase 18090:8090
+scripts/cluster/port-forward.sh deploy/c11n-caddy 18080:8080
+scripts/cluster/port-forward.sh svc/c11n-pocketbase 18090:8090
 ```
+
+`NAMESPACE=<ns>` overrides the namespace (default `default`, matching the
+install script); `LOG=<file>` sends kubectl's output somewhere (default
+`${TMPDIR:-/tmp}/c11n-port-forward-<port>.log`); extra arguments after the two
+positionals are passed to `kubectl port-forward` (e.g. `--address 0.0.0.0`).
 
 - `18080` → Caddy: the review origin, the same port the local stack uses, so
   `C11N_E2E_BASE_URL=http://127.0.0.1:18080` and any invite link the install
@@ -78,6 +106,14 @@ or pocketbase's ingress from caddy, but `kubectl port-forward` arrives from the
 kubelet and whether a CNI applies policy to that traffic varies. If one of the
 two hangs, add the node subnet to `networkPolicy.additionalAllowedCidrs`, or
 re-install with `scripts/cluster/install-closedcloud.sh NETWORK_POLICY=0`.
+
+**Ingress, not port-forward:** on k3s/closedcloud Traefik runs with
+`hostNetwork: true`, so its requests arrive from the node IP and the chart's
+`namespaceSelector` cannot match them — the caddy policy 502s every request
+with both pods Ready. `install-closedcloud.sh` detects this and passes the
+nodes' InternalIPs (/32) as `additionalAllowedCidrs`. If you install by hand,
+check `kubectl -n kube-system get pods -l app.kubernetes.io/name=traefik -o
+jsonpath='{.items[*].spec.hostNetwork}'` and set the node CIDR yourself.
 
 ### Why a port-forward and not the Traefik hostname
 
@@ -107,9 +143,14 @@ with a reason, and the rest of the file still runs.
 | `topology.spec` "gzip-accepting HTML request" | the direct-upstream half | talks to `127.0.0.1:15174`, the local fixture port; the in-cluster upstream has no published port |
 | `phase3-exit.spec` | nothing | it mints a fresh owner link instead of reading the bootstrap log |
 
-`globalSetup` in external mode only validates the environment and probes both
-URLs (the sign-in page on the proxy, `/api/health` on PocketBase) — a typo'd
-URL fails in one second with one message instead of forty spec failures.
+`globalSetup` in external mode validates the environment, probes both URLs (the
+sign-in page on the proxy, `/api/health` on PocketBase), and then runs an origin
+preflight: a `POST /__c11n/auth/claim` with a bogus token and `Origin` set to
+`C11N_E2E_BASE_URL` (`e2e/origin-preflight.ts`). A 410 means the origin was
+accepted; a 403 `cross-origin claim refused` fails the run immediately with one
+message naming the base URL and `publicUrl`. It is non-destructive: the token
+is not a real invite. So a typo'd URL or a release installed for the wrong
+`publicUrl` fails in one second, not as forty spec failures.
 `globalTeardown` does nothing.
 
 ## 5. Caveats
@@ -125,5 +166,10 @@ URL fails in one second with one message instead of forty spec failures.
 - The overlay is the one baked into the Caddy image. If you changed the overlay
   locally, rebuild and reinstall — building `packages/overlay/dist` here proves
   nothing about the running pod.
+- Suppose the release was installed for its Traefik hostname (`publicUrl=
+  http://c11n.closedcloud.test`) and you port-forward instead. Sign-ins fail
+  with 403 `cross-origin claim refused`, and `identity.spec` expects a Secure
+  cookie the release is not setting. Re-install with `E2E_PORT_FORWARD=1` (see
+  §1); the preflight now catches the origin half of this before the suite runs.
 - One worker, one deployment: the specs assert on global row sets
   (`fullyParallel: false`, `workers: 1`).

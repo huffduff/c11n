@@ -239,6 +239,60 @@ for (const guard of guards) {
   check(res.status === 0 && count === 0, 'guard: networkPolicy.enabled=false renders no NetworkPolicy', `rendered ${count}`)
 }
 
+// A hostNetwork ingress controller (Traefik on k3s/closedcloud) arrives from
+// the node IP, which no namespaceSelector matches: the only way to admit it is
+// an ipBlock. This proves additionalAllowedCidrs actually renders as one, in
+// the caddy policy, rather than being dropped by a template edit.
+{
+  const cidrs = ['172.31.0.0/16', '10.0.0.5/32']
+  const res = helm([
+    'template', RELEASE, chartDir, '--namespace', NAMESPACE, '--values', base,
+    '--set-json', `networkPolicy.additionalAllowedCidrs=${JSON.stringify(cidrs)}`,
+  ])
+  // Name, not a label substring: both policies mention `component: caddy`
+  // (the pocketbase one selects caddy pods).
+  const policy =
+    documents(res.stdout).find((doc) => kindOf(doc) === 'NetworkPolicy' && metadataName(doc).endsWith('-caddy')) ?? ''
+  const blocks = [...policy.matchAll(/ipBlock:\n\s+cidr:\s*"?([^"\n]+)"?/g)].map((m) => m[1].trim())
+  check(
+    res.status === 0 && cidrs.every((cidr) => blocks.includes(cidr)),
+    'guard: networkPolicy.additionalAllowedCidrs renders as ipBlock entries in the caddy policy',
+    res.status !== 0 ? res.stderr : `rendered: ${blocks.join(', ') || 'none'}`,
+  )
+}
+
+// ---- per-workload config checksums ------------------------------------------
+// A checksum over the whole .Values restarts BOTH pods for any change. The
+// checksum has to cover only what its workload consumes, or a publicUrl/cookie
+// edit (PocketBase-only) rolls the proxy for nothing - the port-forward in
+// front of it dies and every in-flight request is dropped.
+{
+  const checksumOf = (text, suffix) => {
+    const doc = documents(text).find(
+      (d) => (kindOf(d) === 'Deployment' || kindOf(d) === 'StatefulSet') && metadataName(d).endsWith(suffix),
+    )
+    return doc?.match(/checksum\/config:\s*"?([0-9a-f]{64})"?/)?.[1] ?? ''
+  }
+  const plain = helm(['template', RELEASE, chartDir, '--namespace', NAMESPACE, '--values', base])
+  const changed = helm([
+    'template', RELEASE, chartDir, '--namespace', NAMESPACE, '--values', base,
+    '--set', 'publicUrl=http://127.0.0.1:18080',
+  ])
+  const caddyBefore = checksumOf(plain.stdout, '-caddy')
+  const caddyAfter = checksumOf(changed.stdout, '-caddy')
+  const pbBefore = checksumOf(plain.stdout, '-pocketbase')
+  const pbAfter = checksumOf(changed.stdout, '-pocketbase')
+  check(
+    plain.status === 0 && changed.status === 0 &&
+      caddyBefore !== '' && pbBefore !== '' &&
+      caddyBefore === caddyAfter && pbBefore !== pbAfter,
+    'guard: changing publicUrl rolls pocketbase only (per-workload checksums)',
+    changed.status !== 0
+      ? changed.stderr
+      : `caddy ${caddyBefore.slice(0, 8)}->${caddyAfter.slice(0, 8)}, pocketbase ${pbBefore.slice(0, 8)}->${pbAfter.slice(0, 8)}`,
+  )
+}
+
 // ---- rendered objects that must agree with each other -----------------------
 // A snapshot says "the render changed"; these say "the render is consistent",
 // which is the class of bug a snapshot cannot describe: a Deployment that

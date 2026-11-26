@@ -60,11 +60,13 @@ requires `Content-Type: application/json` plus a same-origin `Origin` /
 - **Public auth paths** all sit under `/__c11n/auth/`. That prefix is the
   only one exempt from the gate:
   - `/__c11n/auth/` is the static sign-in page (also the "Continue" page).
-  - Caddy rewrites `/__c11n/auth/{claim,request,logout}` to the PocketBase
-    hook routes `/api/c11n/auth/{claim,request,logout}`. The old
-    `/__c11n/auth/magic` path still exists but never claims: it 302s to the
-    sign-in page with `reason=legacy`, so links minted before this revision
-    fail closed and an unfurler cannot spend them.
+  - Caddy rewrites `/__c11n/auth/{claim,logout}` to the PocketBase hook
+    routes `/api/c11n/auth/{claim,logout}`. The old `/__c11n/auth/magic`
+    path is answered by Caddy itself with a static 302 to the sign-in page
+    (`reason=legacy`) and never reaches PocketBase: its request logger
+    stores the URL, so a hook route there kept the `?t=` token in `_logs`
+    (removed 2026-11-26). Links minted before this revision still explain
+    themselves, and an unfurler cannot spend them.
 - `POST /__c11n/auth/claim` takes `{t, next}` as JSON, checks the token hash,
   the expiry (72 h, `C11N_LINK_TTL_HOURS`, single use) and the user. It then
   issues a PocketBase auth token, sets **`c11n_session`**: `HttpOnly; Secure;

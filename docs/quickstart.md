@@ -71,12 +71,14 @@ creates the owner account and writes a single-use sign-in link to its log:
 
 ```bash
 docker compose logs pocketbase | grep "c11n bootstrap"
-# c11n bootstrap: owner invite for you@example.com (single use, expires in 72h): http://localhost:8080/__c11n/auth/magic?t=...
+# c11n bootstrap: owner invite for you@example.com (single use, expires in 72h): http://localhost:8080/__c11n/auth/#t=...
 ```
 
-Open that link. It signs you in, sets the session cookie and drops you on the
-site with the `c11n` toolbar. The link works once; a second visit shows the
-sign-in page and asks for a new link.
+Open that link. It shows "Continue to review", which signs you in, sets the
+session cookie and drops you on the site with the `c11n` toolbar. The link
+works once; a second visit shows the sign-in page and asks for a new link.
+The token is in the URL fragment, so no server (and no log) sees it, and the
+page removes it from the address bar as soon as it has been read.
 
 Treat the log line as a credential: it is the only copy of the token, and the
 database stores just its hash.

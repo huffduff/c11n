@@ -476,6 +476,24 @@ export async function signInAs(page: Page, email?: string, role: Role = 'client'
 }
 
 /**
+ * Add `latencyMs` of round-trip to everything the page sends to PocketBase
+ * through the proxy — the overlay's own API prefix, API calls and the realtime
+ * SSE alike. Real reviewers are always remote and the local stack answers in
+ * ~1 ms, which is fast enough to hide request-ordering bugs; specs that care
+ * about them opt in here (see specs/latency.spec.ts).
+ *
+ * A route, not CDP `Network.emulateNetworkConditions`: only the overlay's
+ * traffic is slowed, so the reviewed page and the vite dev server keep their
+ * timing and a run stays quick.
+ */
+export async function withPbLatency(page: Page, latencyMs = 300): Promise<void> {
+  await page.route('**/__c11n/pb/**', async (route) => {
+    await new Promise((resolve) => setTimeout(resolve, latencyMs))
+    await route.continue()
+  })
+}
+
+/**
  * Open a magic link in a browser and click through to the session. This is the
  * one place that knows the page's continue button; every spec that navigates a
  * browser to an invite link should come through here.

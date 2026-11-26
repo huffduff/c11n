@@ -17,15 +17,26 @@ import { inviteAs, invitesFor, readCreds, stackLog, superuserTokenFor } from '..
  * link in stdout (`.stack/pocketbase.log`).
  */
 
-/** Every `_logs` row, serialised: a token may hide in `message` or `data`. */
+/**
+ * Every `_logs` row, serialised: a token may hide in `message` or `data`.
+ *
+ * PocketBase buffers request logs and flushes them every few seconds, so a
+ * spec that starts from a fresh stack (globalSetup wipes pb_data) sees an
+ * empty table for the first ~3 s. Poll for the first flush instead of racing
+ * it: with an empty table the `not.toContain` assertions below would pass
+ * vacuously.
+ */
 async function allLogs(request: import('@playwright/test').APIRequestContext): Promise<string> {
   const creds = readCreds()
-  const res = await request.get(`${creds.pbUrl}/api/logs?perPage=500&sort=-created`, {
-    headers: { authorization: await superuserTokenFor() },
-  })
-  expect(res.status(), await res.text()).toBe(200)
-  const body = (await res.json()) as { items: unknown[]; totalItems: number }
-  expect(body.totalItems).toBeGreaterThan(0)
+  const read = async () => {
+    const res = await request.get(`${creds.pbUrl}/api/logs?perPage=500&sort=-created`, {
+      headers: { authorization: await superuserTokenFor() },
+    })
+    expect(res.status(), await res.text()).toBe(200)
+    return (await res.json()) as { items: unknown[]; totalItems: number }
+  }
+  await expect.poll(async () => (await read()).totalItems, { timeout: 15_000 }).toBeGreaterThan(0)
+  const body = await read()
   return JSON.stringify(body.items)
 }
 
@@ -57,18 +68,21 @@ test.describe('I3 raw tokens never reach the log tables', () => {
     expect(await allLogs(request)).not.toContain(token)
   })
 
-  test('a legacy GET link with ?t= no longer claims and mints no cookie', async ({ request }) => {
+  test('a legacy GET link with ?t= is answered by Caddy, never PocketBase', async ({ request }) => {
     const creds = readCreds()
     const email = `i3-legacy-${Date.now()}@example.test`
     const invite = await inviteAs(request, null, email, 'client')
     const token = new URL(invite.link!).hash.replace(/^#t=/, '')
+    // M-6: the proxy answers this itself, so the request never enters
+    // PocketBase's request log (which stores the URL and would keep the token).
     const res = await request.get(
-      `${creds.pbUrl}/api/c11n/auth/magic?t=${encodeURIComponent(token)}`,
+      `${creds.baseUrl}/__c11n/auth/magic?t=${encodeURIComponent(token)}`,
       { maxRedirects: 0 },
     )
     expect(res.status()).toBe(302)
     expect(res.headers()['location']).toBe('/__c11n/auth/?reason=legacy')
     expect(res.headers()['set-cookie']).toBeUndefined()
+    expect(await allLogs(request)).not.toContain(token)
 
     // Still unused: an unfurler (or anyone) GETting an old-style link cannot
     // burn it.

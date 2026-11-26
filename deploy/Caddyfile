@@ -53,33 +53,56 @@
 	# page, and the two routes that create or clear the session cookie. Caddy
 	# rewrites those routes onto the PocketBase hook routes of the same name.
 	#
-	# claim is a POST with a JSON body: the token never travels in a URL, so the
-	# request log (and any unfurler) never sees it. magic is the legacy GET path
-	# and is deliberately inert — it only redirects to the sign-in page.
+	# Every one of these responses is `private, no-store` (M-1/M-3): they carry
+	# or answer for a bearer, and a cached claim or landing page could be
+	# replayed. claim is a POST with a JSON body: the token never travels in a
+	# URL, so the request log (and any unfurler) never sees it.
+	#
+	# M-6: the legacy `?t=` route is a static 302 here and NEVER reaches
+	# PocketBase. The hook route it used to rewrite to is gone: PocketBase's
+	# request logger stores the full request URL, so a request that reached it
+	# wrote the freshly minted token into `_logs`.
+	handle /__c11n/auth/magic {
+		header Cache-Control "private, no-store"
+		# The explicit `*` matcher is required: without it Caddy sees the
+		# leading `/` of the target as an inline path matcher and redirects to
+		# the string "302" instead (verified in `caddy adapt`).
+		redir * "/__c11n/auth/?reason=legacy" 302
+	}
+
 	handle /__c11n/auth/claim {
+		header Cache-Control "private, no-store"
 		rewrite * /api/c11n/auth/claim
 		reverse_proxy {$C11N_PB_ADDR:pocketbase:8090}
 	}
 
-	handle /__c11n/auth/magic {
-		rewrite * /api/c11n/auth/magic
-		reverse_proxy {$C11N_PB_ADDR:pocketbase:8090}
-	}
-
 	handle /__c11n/auth/logout {
+		header Cache-Control "private, no-store"
 		rewrite * /api/c11n/auth/logout
 		reverse_proxy {$C11N_PB_ADDR:pocketbase:8090}
 	}
 
 	# Static sign-in page. handle_path strips the prefix, so /__c11n/auth/
 	# serves index.html out of C11N_SIGNIN_DIR.
+	#
+	# C11N_SIGNIN_DIR IS PUBLIC: everything under it is served to anonymous
+	# visitors at `/__c11n/auth/*`, so put nothing else there — no source maps,
+	# no `.env`, no notes. `packages/signin/` holds the page, its stylesheet and
+	# its README, and nothing else (M-7).
 	handle_path /__c11n/auth/* {
+		header Cache-Control "private, no-store"
 		root * {$C11N_SIGNIN_DIR:/srv/signin}
 		file_server
 	}
 
 	# PocketBase API + realtime, same-origin under /__c11n/pb/
 	handle_path /__c11n/pb/* {
+		# M-3: nothing under here is cacheable — it is authenticated data and
+		# gate answers. A deferred (`>`) header op runs after the proxy has
+		# written its headers, so it also wins over whatever PocketBase sent,
+		# and it covers the 403 below, which a header_down inside the proxy
+		# could not.
+		header >Cache-Control "private, no-store"
 		# I-1: PocketBase mints bearer tokens on the routes below and returns
 		# them in a JSON body. Caddy injects the httpOnly session cookie as
 		# Authorization on this prefix, so without this a script on the reviewed

@@ -53,6 +53,15 @@
         var hash = new URLSearchParams(window.location.hash.replace(/^#/, ''))
         var token = hash.get('t') || ''
 
+        // M-1: drop the fragment from the address bar as soon as it has been
+        // read. The token is in `token` now, so nothing needs it in the URL —
+        // and leaving it there puts the credential in a screenshot, a
+        // bookmark, a synced browser history or a pasted address. replaceState
+        // (not a reload) keeps `?reason=`/`?next=`, which the page still uses.
+        if (token) {
+          history.replaceState(null, '', window.location.pathname + window.location.search)
+        }
+
         if (token) {
           title.textContent = 'Continue to review'
           message.textContent =

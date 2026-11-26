@@ -20,6 +20,7 @@ const h = vi.hoisted(() => {
       getFirstListItem: vi.fn(),
       create: vi.fn(),
       update: vi.fn().mockResolvedValue({}),
+      delete: vi.fn().mockResolvedValue(undefined),
       subscribe: vi.fn().mockResolvedValue(undefined),
       unsubscribe: vi.fn().mockResolvedValue(undefined),
     }
@@ -628,5 +629,67 @@ describe('subscribe', () => {
     unsubscribe()
     expect(pb.collection('comments').unsubscribe).toHaveBeenCalledWith('*')
     expect(pb.collection('replies').unsubscribe).toHaveBeenCalledWith('*')
+  })
+})
+
+describe('M-4 a 401 from any call sends the user to sign-in', () => {
+  /** jsdom-less location stub: goToSignIn reads pathname/search and assigns. */
+  function stubLocation() {
+    const assign = vi.fn()
+    vi.stubGlobal('location', { assign, pathname: '/pricing', search: '?x=1' })
+    return assign
+  }
+
+  it('a write that 401s navigates to the sign-in page instead of throwing silently', async () => {
+    const { backend, pb } = setup()
+    await authenticate(backend, userRecord)
+    const assign = stubLocation()
+    pb.collection('comments').create.mockRejectedValue({ status: 401 })
+
+    await expect(
+      backend.createComment({
+        project: 'proj1',
+        path: '/pricing',
+        selector: 'h1',
+        anchorMeta: null,
+        body: 'after logout',
+      }),
+    ).rejects.toBeTruthy()
+
+    expect(assign).toHaveBeenCalledWith(
+      `/__c11n/auth/?reason=expired&next=${encodeURIComponent('/pricing?x=1')}`,
+    )
+  })
+
+  it('a read that 401s (listComments) does the same', async () => {
+    const { backend, pb } = setup()
+    await authenticate(backend, userRecord)
+    const assign = stubLocation()
+    pb.collection('comments').getFullList.mockRejectedValue({ status: 401 })
+
+    await expect(backend.listComments('proj1', '/pricing')).rejects.toBeTruthy()
+    expect(assign).toHaveBeenCalledTimes(1)
+  })
+
+  it('navigates only once for repeated 401s', async () => {
+    const { backend, pb } = setup()
+    await authenticate(backend, userRecord)
+    const assign = stubLocation()
+    pb.collection('comments').update.mockRejectedValue({ status: 401 })
+    pb.collection('comments').delete.mockRejectedValue({ status: 401 })
+
+    await expect(backend.setResolved('c1', true)).rejects.toBeTruthy()
+    await expect(backend.deleteComment('c1')).rejects.toBeTruthy()
+    expect(assign).toHaveBeenCalledTimes(1)
+  })
+
+  it('a non-401 failure does not navigate (a 403 is a permission error, not a dead session)', async () => {
+    const { backend, pb } = setup()
+    await authenticate(backend, userRecord)
+    const assign = stubLocation()
+    pb.collection('comments').delete.mockRejectedValue({ status: 403 })
+
+    await expect(backend.deleteComment('c1')).rejects.toBeTruthy()
+    expect(assign).not.toHaveBeenCalled()
   })
 })

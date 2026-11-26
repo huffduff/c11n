@@ -362,7 +362,13 @@ routerAdd("POST", "/api/c11n/auth/claim", (e) => {
   // link is built from); otherwise the Host this request arrived with, behind
   // Caddy / the ingress.
   const contentType = String(e.request.header.get("Content-Type") || "").toLowerCase()
-  if (contentType.indexOf("application/json") !== 0) {
+  // M-5: compare the MEDIA TYPE exactly. `indexOf("application/json") === 0`
+  // also accepted `application/json-patch+json` (and any other `+json`
+  // suffix), which is a different content type with different semantics; the
+  // route takes plain JSON and nothing else. Parameters (`; charset=utf-8`)
+  // are allowed and dropped before the comparison.
+  const mediaType = contentType.split(";")[0].trim()
+  if (mediaType !== "application/json") {
     return e.json(415, { message: "claim requires application/json" })
   }
   const host = String(e.request.header.get("Host") || "")
@@ -478,22 +484,12 @@ routerAdd("POST", "/api/c11n/auth/claim", (e) => {
   return e.json(200, { redirect: next })
 })
 
-// ---- 3.4b: GET /api/c11n/auth/magic — the legacy link, kept inert ----------
-// Links minted before the fragment change were `.../magic?t=<token>`. They are
-// still pasted in Slack, so the path stays alive — but it NEVER claims: a GET
-// is exactly what an unfurler is allowed to do, and burning the invite there is
-// the bug this route used to be. It points at the sign-in page, which explains
-// that the link is out of date.
-//
-// Removing it instead would 404 through Caddy's static handler, which tells the
-// user nothing and tells a scanner that the route is gone; a 302 with a reason
-// costs one line.
-routerAdd("GET", "/api/c11n/auth/magic", (e) => {
-  e.response.header().set("X-C11n-Error", "legacy")
-  return e.redirect(302, "/__c11n/auth/?reason=legacy")
-})
-
 // ---- 3.6: session, me and logout ------------------------------------------
+// (The legacy `GET /api/c11n/auth/magic` route that used to sit here is GONE —
+// M-6. deploy/Caddyfile answers /__c11n/auth/magic itself with a static 302 to
+// the sign-in page, so an old `?t=` link still explains itself but never
+// reaches PocketBase: its request logger stores the full URL, and the hook
+// route was writing the token into `_logs` on every open.)
 // GET  /api/c11n/session       — Caddy forward_auth target (pod-internal when
 //                                the gate lands in 3.8)
 // GET  /api/c11n/me            — what the overlay calls instead of authRefresh
@@ -505,8 +501,17 @@ routerAdd("GET", "/api/c11n/auth/magic", (e) => {
 // (verified on 0.39.11), so without the collection check an admin token in the
 // cookie would be a valid session for the proxy gate.
 routerAdd("GET", "/api/c11n/session", (e) => {
+  // M-3: this route's answers (200, 401 and the 302 to the sign-in page) are
+  // relayed by Caddy's forward_auth, and a cached "you're signed in" answer
+  // must never be replayable after the session ends.
+  e.response.header().set("Cache-Control", "private, no-store")
+
   // Manual Cookie parsing: e.request.cookie(name) signals "not found" with an
   // error rather than null, which is awkward to tell apart from a bad token.
+  // M-2: the FIRST c11n_session wins and the rest are ignored, matching
+  // Caddy's {http.request.cookie.c11n_session} (Go's r.Cookie returns the
+  // first match). Iterating to the end let a page set a second cookie and
+  // choose which identity the gate validated.
   const cookieHeader = e.request.header.get("Cookie") || ""
   let sessionToken = ""
   const parts = cookieHeader.split(";")
@@ -514,6 +519,7 @@ routerAdd("GET", "/api/c11n/session", (e) => {
     const part = parts[i].trim()
     if (part.indexOf("c11n_session=") === 0) {
       sessionToken = part.slice("c11n_session=".length)
+      break
     }
   }
 
@@ -586,12 +592,14 @@ routerAdd("GET", "/api/c11n/me", (e) => {
   }
   if (!token) {
     // Same cookie the session route reads: the overlay's browser sends it.
+    // M-2: first match only, same as Caddy.
     const cookieHeader = String(e.request.header.get("Cookie") || "")
     const parts = cookieHeader.split(";")
     for (let i = 0; i < parts.length; i++) {
       const part = parts[i].trim()
       if (part.indexOf("c11n_session=") === 0) {
         token = part.slice("c11n_session=".length)
+        break
       }
     }
   }
@@ -638,6 +646,9 @@ routerAdd("POST", "/api/c11n/auth/logout", (e) => {
       } catch (err) {
         // Not a live token: nothing to revoke.
       }
+      // M-2: only the first c11n_session cookie is the session, so only that
+      // one is revoked — a later bogus copy must not stop the revoke.
+      break
     }
   }
 

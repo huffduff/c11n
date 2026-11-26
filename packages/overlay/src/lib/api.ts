@@ -1,4 +1,5 @@
 import PocketBase, { BaseAuthStore } from 'pocketbase'
+import { goToSignIn } from './signin'
 import type { CommentRec, InviteResult, Me, NewComment, RealtimeHandlers, ReplyRec, Role } from './types'
 
 export type { CommentRec, InviteResult, Me, NewComment, RealtimeHandlers, ReplyRec, Role }
@@ -61,9 +62,11 @@ export function createPocketBaseBackend(baseUrl = '/__c11n/pb'): C11nBackend {
   function resolveProjectId(slug: string): Promise<string> {
     let pending = projectIdBySlug.get(slug)
     if (!pending) {
-      pending = pb
-        .collection('projects')
-        .getFirstListItem(pb.filter('slug = {:slug}', { slug }))
+      pending = guard(() =>
+        pb
+          .collection('projects')
+          .getFirstListItem(pb.filter('slug = {:slug}', { slug })),
+      )
         .then((rec: AnyRecord) => {
           slugById.set(rec.id, slug)
           return rec.id as string
@@ -80,6 +83,30 @@ export function createPocketBaseBackend(baseUrl = '/__c11n/pb'): C11nBackend {
 
   function mapMe(r: AnyRecord): Me {
     return { id: r.id, email: r.email, name: r.name || r.email, role: (r.role as Role) ?? 'client' }
+  }
+
+  // M-4: a 401 from ANY request means the session cookie died — it expired, or
+  // a sign-out in another tab rotated the user's tokenKey. Only `me()` used to
+  // notice, so a write would throw while the UI still claimed the user was
+  // signed in. Every SDK call goes through `guard`, which hands the user to
+  // the sign-in page once and then lets the original error through.
+  let redirecting = false
+  /** Route a dead-session answer to the sign-in page, once. */
+  function noteUnauthorized(status: number): void {
+    if (redirecting || status !== 401) return
+    redirecting = true
+    current = null
+    goToSignIn('expired')
+  }
+
+  async function guard<T>(run: () => Promise<T>): Promise<T> {
+    try {
+      return await run()
+    } catch (err) {
+      const e = err as { status?: number; response?: { status?: number } } | null
+      noteUnauthorized(e?.status ?? e?.response?.status ?? 0)
+      throw err
+    }
   }
 
   /** Display name from an expanded author relation, if present. */
@@ -182,6 +209,9 @@ export function createPocketBaseBackend(baseUrl = '/__c11n/pb'): C11nBackend {
         // A non-JSON body is an error page, not an invite.
       }
       if (!res.ok) {
+        // M-4: an invite with no session is the same dead-session answer as an
+        // SDK call; route it the same way (once).
+        noteUnauthorized(res.status)
         const err = new Error(body.message || `Invite failed (${res.status})`) as Error & {
           status?: number
         }
@@ -199,11 +229,13 @@ export function createPocketBaseBackend(baseUrl = '/__c11n/pb'): C11nBackend {
         path === undefined
           ? pb.filter('project = {:projectId}', { projectId })
           : pb.filter('project = {:projectId} && path = {:path}', { projectId, path })
-      const records = await pb.collection('comments').getFullList({
-        filter,
-        sort: 'created',
-        expand: 'author',
-      })
+      const records = await guard(() =>
+        pb.collection('comments').getFullList({
+          filter,
+          sort: 'created',
+          expand: 'author',
+        }),
+      )
       return records.map(mapComment)
     },
 
@@ -213,28 +245,32 @@ export function createPocketBaseBackend(baseUrl = '/__c11n/pb'): C11nBackend {
       // Expand the author: the create response is upserted over the realtime
       // echo, and the echo carries no expand — without this the HTTP record
       // (authorName undefined) would blank the name backfilled from session.
-      const rec = await pb
-        .collection('comments')
-        .create({ ...input, project: projectId, author: me.id }, { expand: 'author' })
+      const rec = await guard(() =>
+        pb
+          .collection('comments')
+          .create({ ...input, project: projectId, author: me.id }, { expand: 'author' }),
+      )
       return mapComment(rec)
     },
 
     async setResolved(id, resolved) {
-      await pb.collection('comments').update(id, { resolved })
+      await guard(() => pb.collection('comments').update(id, { resolved }))
     },
 
     async deleteComment(id) {
       // The replies cascade server-side (the `replies.comment` relation is
       // cascadeDelete), so there is no second call to make here.
-      await pb.collection('comments').delete(id)
+      await guard(() => pb.collection('comments').delete(id))
     },
 
     async listReplies(commentId) {
-      const records = await pb.collection('replies').getFullList({
-        filter: pb.filter('comment = {:commentId}', { commentId }),
-        sort: 'created',
-        expand: 'author',
-      })
+      const records = await guard(() =>
+        pb.collection('replies').getFullList({
+          filter: pb.filter('comment = {:commentId}', { commentId }),
+          sort: 'created',
+          expand: 'author',
+        }),
+      )
       return records.map(mapReply)
     },
 
@@ -242,13 +278,15 @@ export function createPocketBaseBackend(baseUrl = '/__c11n/pb'): C11nBackend {
       const me = requireAuth()
       // Same reason as createComment: keep the display name on the record the
       // caller upserts over the (unexpanded) realtime echo.
-      const rec = await pb.collection('replies').create(
-        {
-          comment: commentId,
-          body,
-          author: me.id,
-        },
-        { expand: 'author' },
+      const rec = await guard(() =>
+        pb.collection('replies').create(
+          {
+            comment: commentId,
+            body,
+            author: me.id,
+          },
+          { expand: 'author' },
+        ),
       )
       return mapReply(rec)
     },

@@ -272,6 +272,9 @@ describe('listComments', () => {
       filter: 'project = "pid1" && path = "/pricing"',
       sort: 'created',
       expand: 'author',
+      // Per-query cancel key: the SDK's default (method+path) makes the
+      // per-page and project-wide lists abort each other.
+      requestKey: 'c11n:comments:/pricing',
     })
   })
 
@@ -307,6 +310,7 @@ describe('listComments', () => {
       filter: 'project = "pid1"',
       sort: 'created',
       expand: 'author',
+      requestKey: 'c11n:comments:*',
     })
   })
 
@@ -468,6 +472,7 @@ describe('replies', () => {
       filter: 'comment = "c1"',
       sort: 'created',
       expand: 'author',
+      requestKey: 'c11n:replies:c1',
     })
     expect(out).toEqual([
       { id: 'r1', comment: 'c1', body: 'agreed', author: 'u2', authorName: 'Bob', created: 'x' },

@@ -234,6 +234,15 @@ export function createPocketBaseBackend(baseUrl = '/__c11n/pb'): C11nBackend {
           filter,
           sort: 'created',
           expand: 'author',
+          // The SDK's automatic cancel key is method+path (query ignored), so
+          // the per-page list and the project-wide sidebar list — same
+          // collection, same path — abort each other whenever both are in
+          // flight. On a remote link that is every page load with the sidebar
+          // open: the page list died, `items` stayed empty, and the page kept
+          // no pins and no thread popover until a reload. A key per query
+          // keeps "ignore this stale answer" where it belongs: the store's
+          // own path/sidebar tokens.
+          requestKey: `c11n:comments:${path ?? '*'}`,
         }),
       )
       return records.map(mapComment)
@@ -269,6 +278,11 @@ export function createPocketBaseBackend(baseUrl = '/__c11n/pb'): C11nBackend {
           filter: pb.filter('comment = {:commentId}', { commentId }),
           sort: 'created',
           expand: 'author',
+          // Same collision as listComments: two threads opened in quick
+          // succession share the collection path, and the SDK would cancel the
+          // first thread's fetch — a thread opened before its replies landed
+          // showed none of them.
+          requestKey: `c11n:replies:${commentId}`,
         }),
       )
       return records.map(mapReply)

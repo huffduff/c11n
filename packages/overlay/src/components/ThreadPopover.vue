@@ -1,9 +1,14 @@
 <script setup lang="ts">
 // Thread popover for the active comment: body + author + date, replies,
 // reply box, resolve. Mounted fresh per thread (App keys it on
-// activeCommentId), so onMounted is the whole lifecycle: load replies, then
+// activeCommentId), so this is the whole lifecycle: load replies, then
 // position against the anchored element via @floating-ui/dom.
-import { computed, onMounted, ref } from 'vue'
+//
+// The record is read from the store, and on a slow link the row click can
+// land before the page's comment list has: the popover then mounts with
+// nothing to show. Waiting on `comment` (not onMounted alone) means the click
+// is never dropped — it opens as soon as its data is there.
+import { computed, onMounted, ref, watch } from 'vue'
 import { computePosition, flip, offset, shift } from '@floating-ui/dom'
 import { useCommentsStore } from '../stores/comments'
 import { useSessionStore } from '../stores/session'
@@ -32,12 +37,31 @@ const isAuthor = computed(() => !!comment.value && comment.value.author === sess
 const mayResolve = computed(() => canResolve(session.me?.role, isAuthor.value))
 const mayDelete = computed(() => canDelete(session.me?.role, isAuthor.value))
 
-onMounted(async () => {
+/** Load this thread's replies once, then place the card against its anchor. */
+async function ready() {
+  const id = comment.value?.id
+  if (!id) return
+  await store.loadReplies(id)
+  // Position after the replies are in, so the card's height (and therefore
+  // flip/shift) is final; re-read `comment` because the store may have swapped
+  // the record while the replies loaded.
   const c = comment.value
-  if (!c) return
-  await store.loadReplies(c.id)
-  await position(c)
-})
+  if (c) await position(c)
+}
+
+// First paint: the record is normally already in the store.
+onMounted(ready)
+// …and when it is not (a row clicked before the page list landed), the click
+// still opens the thread, just as soon as the record shows up.
+watch(
+  // By id, not by record identity: the store replaces the record on every
+  // upsert (realtime echo, resolve) and neither should reload replies or jump
+  // the card.
+  () => comment.value?.id ?? null,
+  () => ready(),
+  // After the DOM patch: the card only exists once `comment` renders it.
+  { flush: 'post' },
+)
 
 async function position(c: CommentRec) {
   if (!card.value) return

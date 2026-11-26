@@ -195,4 +195,25 @@ describe('ThreadPopover.vue', () => {
 
     expect(computePosition).not.toHaveBeenCalled()
   })
+
+  it('opens on a record that lands after the click (row clicked before the list loaded)', async () => {
+    const mock = makeMockBackend()
+    setBackend(mock)
+    const comment = rec()
+    useSessionStore().me = { id: comment.author, email: 'tom@hfdf.io', name: 'Tom', role: 'client' }
+    const store = useCommentsStore()
+    store.currentPath = comment.path
+    // The click happened, the page's comment list has not answered yet.
+    store.openThread(comment.id)
+    wrapper = mount(ThreadPopover, { global: { plugins: [pinia] } })
+    await flush(wrapper)
+    expect(wrapper.find('.c11n-popover').exists()).toBe(false)
+
+    store.items = [comment]
+    await flush(wrapper)
+
+    expect(wrapper.find('.c11n-popover-body').text()).toBe('Too expensive')
+    expect(mock.listReplies).toHaveBeenCalledWith('c1')
+    expect(computePosition).toHaveBeenCalledTimes(1)
+  })
 })

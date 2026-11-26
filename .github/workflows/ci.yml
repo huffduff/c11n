@@ -233,10 +233,19 @@ jobs:
           node-version-file: .tool-versions
           cache: npm
 
+      # scripts/check-image-context.sh builds the overlay AND the demo upstream's
+      # Go module (the same build examples/demo-go-server/Dockerfile runs), so it
+      # needs the pinned go. No module cache: the server is stdlib-only.
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: .tool-versions
+          cache: false
+
       # No daemon on the dev boxes, so the caddy build stage's COPY set is
       # proven natively: it copies exactly what the Dockerfile COPYs and runs
-      # the same npm ci + build. Catches a missing COPY or .dockerignore entry.
-      - name: Simulate the caddy build stage
+      # the same npm ci + build, then the demo server's go build. Catches a
+      # missing COPY, a .dockerignore entry, or a WORKDIR outside the module.
+      - name: Simulate the image build stages
         run: scripts/check-image-context.sh
 
       - name: Smoke-build caddy image

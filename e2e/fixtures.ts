@@ -9,6 +9,7 @@
 import { request, type APIRequestContext, type Page } from '@playwright/test'
 import fs from 'node:fs'
 import path from 'node:path'
+import { destructiveRefusal } from './external-guard'
 
 export interface Creds {
   email: string
@@ -317,6 +318,12 @@ async function allRecords(collection: string): Promise<Array<{ id: string }>> {
  * seq 1, which several specs assert on.
  */
 export async function resetData(): Promise<void> {
+  // Second gate, at the point of deletion: external mode may only wipe a
+  // deployment the operator confirmed is disposable (e2e/external-guard.ts).
+  // globalSetup checks this too; this is the one that runs next to the DELETE.
+  const refusal = destructiveRefusal()
+  if (refusal) throw new Error(`resetData: ${refusal}`)
+
   const creds = readCreds()
   const headers = { authorization: await superuserTokenFor() }
   for (const collection of ['replies', 'comments', 'comment_counters']) {

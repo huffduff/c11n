@@ -12,6 +12,12 @@
 #   3. helm upgrade --install the chart against it, plain http behind Traefik
 #   4. prints the owner sign-in link from the pocketbase container log
 #
+# IMAGES ARE PINNED BY DIGEST when `closedcloud build` returns one, and the tag
+# carries an epoch otherwise: a bare short sha is a moving tag, so a rebuild of
+# the same commit used to be silently ignored (IfNotPresent).
+#
+# The PocketBase admin UI is NOT published unless ADMIN_INGRESS=1.
+#
 # WHAT IT DOES NOT DO:
 #   * it never runs `closedcloud up`, `down` or `scale`: the cluster's lifetime
 #     belongs to the operator (and this session's cluster is torn down when the
@@ -31,8 +37,11 @@
 #
 # OVERRIDES (all optional):
 #   RELEASE=c11n  NAMESPACE=default  HOST=c11n.closedcloud.test
-#   OWNER_EMAIL=owner@c11n.test  TAG=<git short sha by default>
+#   OWNER_EMAIL=owner@c11n.test  TAG=<git short sha>-<epoch> by default
 #   UPSTREAM_URL=http://demo:15174  SKIP_BUILD=1 (reuse TAG's images)
+#   ADMIN_INGRESS=1 publishes the PocketBase admin UI on ADMIN_HOST. OFF by
+#     default: the runbook's port-forward is the supported way in, and this
+#     hostname has no TLS and no gate in front of it.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -46,7 +55,13 @@ OWNER_EMAIL="${OWNER_EMAIL:-owner@c11n.test}"
 UPSTREAM_URL="${UPSTREAM_URL:-http://demo:15174}"
 DRY_RUN="${DRY_RUN:-0}"
 SKIP_BUILD="${SKIP_BUILD:-0}"
-TAG="${TAG:-$(git -C "$REPO_ROOT" rev-parse --short HEAD 2>/dev/null || date +%Y%m%d%H%M%S)}"
+ADMIN_INGRESS="${ADMIN_INGRESS:-0}"
+# A bare short sha is a MOVING tag for the same commit: rebuild the commit and
+# the cluster keeps the old image under IfNotPresent. The epoch makes every
+# build's tag unique, so a rebuild always deploys what was just built. (The
+# digest from `closedcloud build` is preferred where it is available - see
+# build_image.)
+TAG="${TAG:-$(git -C "$REPO_ROOT" rev-parse --short HEAD 2>/dev/null || date +%Y%m%d%H%M%S)-$(date +%s)}"
 
 # Build logs and JSON go here, outside the repo.
 OUT="${OUT:-${TMPDIR:-/tmp}/c11n-cluster-install}"
@@ -89,6 +104,7 @@ build_image() {
 	json="$OUT/$name.json"
 	BUILD_REPO=""
 	BUILD_TAG=""
+	BUILD_DIGEST=""
 
 	if [ "$DRY_RUN" = 1 ]; then
 		if [ -n "$dockerfile" ]; then
@@ -113,38 +129,58 @@ build_image() {
 
 	BUILD_REPO="$(node "$JSON_GET" repository "$json")"
 	BUILD_TAG="$(node "$JSON_GET" tag "$json")"
-	log "$name -> $BUILD_REPO:$BUILD_TAG"
+	# `closedcloud build` also returns `reference`: the digest-pinned name of the
+	# image it just built (`repo:tag@sha256:...`). Deploying that digest is
+	# strictly better than the tag - there is nothing left for the kubelet to
+	# resolve, so a rebuilt image can never be masked by IfNotPresent or by a
+	# stale registry tag. It is absent on an older closedcloud (json-get exits
+	# non-zero), which falls back to the tag.
+	BUILD_DIGEST="$(node "$JSON_GET" reference "$json" 2>/dev/null | sed -n 's/.*@\(sha256:[0-9a-f]\{64\}\)$/\1/p' || true)"
+	log "$name -> $BUILD_REPO:$BUILD_TAG${BUILD_DIGEST:+ (digest $BUILD_DIGEST)}"
 }
 
 # ---- 1. images -------------------------------------------------------------
 CADDY_REPO=""
 CADDY_TAG=""
+CADDY_DIGEST=""
 PB_REPO=""
 PB_TAG=""
+PB_DIGEST=""
 DEMO_REPO=""
 DEMO_TAG=""
+DEMO_DIGEST=""
 
 build_image c11n-caddy . deploy/caddy/Dockerfile "$TAG"
 CADDY_REPO="$BUILD_REPO"
 CADDY_TAG="$BUILD_TAG"
+CADDY_DIGEST="$BUILD_DIGEST"
 
 build_image c11n-pocketbase deploy/pocketbase "" "$TAG"
 PB_REPO="$BUILD_REPO"
 PB_TAG="$BUILD_TAG"
+PB_DIGEST="$BUILD_DIGEST"
 
 build_image c11n-demo . examples/demo-go-server/Dockerfile "$TAG"
 DEMO_REPO="$BUILD_REPO"
 DEMO_TAG="$BUILD_TAG"
+DEMO_DIGEST="$BUILD_DIGEST"
+
+# The demo manifest takes one image reference; the digest is the whole point of
+# preferring it, so use it when closedcloud returned one.
+DEMO_IMAGE="$DEMO_REPO:$DEMO_TAG"
+if [ -n "$DEMO_DIGEST" ]; then
+	DEMO_IMAGE="$DEMO_REPO@$DEMO_DIGEST"
+fi
 
 # ---- 2. the demo upstream --------------------------------------------------
 # The manifest carries __DEMO_IMAGE__ instead of a literal image so one file
 # works for every build; substitution happens here, not in the file.
 demo_manifest="$OUT/demo-upstream.yaml"
 if [ "$DRY_RUN" = 1 ]; then
-	printf '+ sed s|__DEMO_IMAGE__|%s:%s| scripts/cluster/demo-upstream.yaml | kubectl apply -n %s -f -\n' \
-		"$DEMO_REPO" "$DEMO_TAG" "$NAMESPACE" >&2
+	printf '+ sed s|__DEMO_IMAGE__|%s| scripts/cluster/demo-upstream.yaml | kubectl apply -n %s -f -\n' \
+		"$DEMO_IMAGE" "$NAMESPACE" >&2
 else
-	sed "s|__DEMO_IMAGE__|$DEMO_REPO:$DEMO_TAG|" "$REPO_ROOT/scripts/cluster/demo-upstream.yaml" >"$demo_manifest"
+	sed "s|__DEMO_IMAGE__|$DEMO_IMAGE|" "$REPO_ROOT/scripts/cluster/demo-upstream.yaml" >"$demo_manifest"
 	run kubectl apply -n "$NAMESPACE" -f "$demo_manifest"
 	run kubectl rollout status deploy/demo -n "$NAMESPACE" --timeout=180s
 fi
@@ -152,6 +188,33 @@ fi
 # ---- 3. the chart ----------------------------------------------------------
 # The storage class is spelled out (gp3 is this cluster's default) so the
 # install does not depend on a cluster default existing.
+#
+# Images: repository always, plus EITHER the digest closedcloud returned (it
+# wins over the tag in the chart: the rendered reference is repo@digest) or the
+# tag. Never both, so what helm renders is unambiguous.
+IMAGE_ARGS=(
+	--set "caddy.image.repository=$CADDY_REPO"
+	--set "pocketbase.image.repository=$PB_REPO"
+)
+if [ -n "$CADDY_DIGEST" ]; then
+	IMAGE_ARGS+=(--set "caddy.image.digest=$CADDY_DIGEST")
+else
+	IMAGE_ARGS+=(--set "caddy.image.tag=$CADDY_TAG")
+fi
+if [ -n "$PB_DIGEST" ]; then
+	IMAGE_ARGS+=(--set "pocketbase.image.digest=$PB_DIGEST")
+else
+	IMAGE_ARGS+=(--set "pocketbase.image.tag=$PB_TAG")
+fi
+
+# The admin UI is OFF unless asked for: it publishes the PocketBase superuser
+# login with no TLS and no gate, and the runbook's port-forward is the
+# supported way in.
+ADMIN_ARGS=()
+if [ "$ADMIN_INGRESS" = 1 ]; then
+	ADMIN_ARGS+=(--set "adminIngress.enabled=true" --set "adminIngress.host=$ADMIN_HOST")
+fi
+
 run helm upgrade --install "$RELEASE" "$REPO_ROOT/deploy/helm/c11n" \
 	--namespace "$NAMESPACE" --create-namespace \
 	--wait --timeout 10m \
@@ -165,12 +228,8 @@ run helm upgrade --install "$RELEASE" "$REPO_ROOT/deploy/helm/c11n" \
 	--set "cookie.secure=false" \
 	--set "persistence.storageClass=gp3" \
 	--set "persistence.size=1Gi" \
-	--set "caddy.image.repository=$CADDY_REPO" \
-	--set "caddy.image.tag=$CADDY_TAG" \
-	--set "pocketbase.image.repository=$PB_REPO" \
-	--set "pocketbase.image.tag=$PB_TAG" \
-	--set "adminIngress.enabled=true" \
-	--set "adminIngress.host=$ADMIN_HOST" \
+	"${IMAGE_ARGS[@]}" \
+	"${ADMIN_ARGS[@]}" \
 	--set "resources.caddy.requests.cpu=10m" \
 	--set "resources.caddy.requests.memory=32Mi" \
 	--set "resources.caddy.limits.memory=128Mi" \
@@ -205,7 +264,11 @@ fi
 
 printf 'c11n installed: %s\n' "$RELEASE"
 printf '  review URL:  http://%s/  (via Traefik at the cluster address)\n' "$HOST"
-printf '  admin UI:    http://%s/_/  (adminIngress; prefer a port-forward in real use)\n' "$ADMIN_HOST"
+if [ "$ADMIN_INGRESS" = 1 ]; then
+	printf '  admin UI:    http://%s/_/  (ADMIN_INGRESS=1; prefer a port-forward in real use)\n' "$ADMIN_HOST"
+else
+	printf '  admin UI:    not published (ADMIN_INGRESS=0); use the port-forward below\n'
+fi
 printf '  port-forward: kubectl port-forward deploy/%s -n %s 18080:8080 18090:8090\n' "$RELEASE" "$NAMESPACE"
 printf '\n'
 if link_line="$(owner_link)"; then

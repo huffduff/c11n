@@ -55,10 +55,12 @@ metadata:
     app.kubernetes.io/managed-by: Helm
     app.kubernetes.io/component: proxy
   annotations:
-    # helm uninstall removes the release's objects but never a PVC's
-    # underlying volume: the data survives an uninstall and a reinstall
-    # re-adopts this claim. Deleting the PVC is a separate, explicit step
-    # (docs/runbook.md).
+    # helm uninstall removes the release's objects but never a PVC's underlying
+    # volume, so the data survives an uninstall. The claim also KEEPS the
+    # release's ownership annotations, which is why a reinstall needs
+    # `helm upgrade --install <rel> ... --take-ownership` (Helm 4): without it
+    # helm refuses to adopt an object that belongs to a release it does not
+    # know. Deleting the PVC is a separate, explicit step (docs/runbook.md §10).
     helm.sh/resource-policy: keep
 spec:
   accessModes:

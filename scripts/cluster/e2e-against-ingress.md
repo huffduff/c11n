@@ -8,13 +8,23 @@ down or wiped.
 
 ```
 C11N_E2E_EXTERNAL=1 \
+C11N_E2E_ALLOW_DESTRUCTIVE=1 \
 C11N_E2E_BASE_URL=http://127.0.0.1:18080 \
 C11N_E2E_PB_URL=http://127.0.0.1:18090 \
 C11N_E2E_SU_EMAIL=e2e-su@c11n.test \
-C11N_E2E_SU_PASSWORD=<the password you set below> \
+C11N_E2E_SU_PASSWORD=<a-long-e2e-password> \
 C11N_FIXTURE=go \
 npx -w e2e playwright test
 ```
+
+`C11N_E2E_ALLOW_DESTRUCTIVE=1` is required: the suite deletes every comment and
+reply (`resetData`) and creates users in whatever it points at, so external mode
+will not start without it. In addition it refuses to start unless **both**
+`C11N_E2E_BASE_URL` and `C11N_E2E_PB_URL` are loopback (`127.0.0.1`,
+`localhost`, `::1` — the port-forward above) or end in `.closedcloud.test`. For
+a test cluster behind any other name, add
+`C11N_E2E_I_KNOW_THIS_IS_NOT_PRODUCTION=1`; a real client's review site is never
+a target.
 
 `C11N_FIXTURE=go` is not strictly required (external mode defaults to `go`), but
 saying it out loud documents the assumption: the install deploys the Go demo
@@ -96,7 +106,11 @@ URL fails in one second with one message instead of forty spec failures.
 - **The suite writes to the deployment.** It creates users (`e2e-*@c11n.test`,
   `client-*@example.test`), comments and replies, and `resetData()` deletes
   every comment/reply before several specs. That is fine on a disposable test
-  cluster; never point external mode at a real client's review site.
+  cluster; never point external mode at a real client's review site. Three keys
+  enforce that: `C11N_E2E_ALLOW_DESTRUCTIVE=1` is mandatory, both origins must
+  be loopback or `*.closedcloud.test`, and any other hostname additionally needs
+  `C11N_E2E_I_KNOW_THIS_IS_NOT_PRODUCTION=1`. `globalSetup` and `resetData()`
+  both refuse, with the reason in the message (`e2e/external-guard.ts`).
 - The overlay is the one baked into the Caddy image. If you changed the overlay
   locally, rebuild and reinstall — building `packages/overlay/dist` here proves
   nothing about the running pod.

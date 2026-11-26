@@ -8,8 +8,27 @@ This is the operating manual. The chart is `deploy/helm/c11n`; its `values.yaml`
 documents every knob, and `templates/NOTES.txt` repeats the three commands you
 need right after an install.
 
-Throughout: `<rel>` is the Helm release name (say `c11n`), `<ns>` its namespace,
-`<host>` the review hostname.
+Throughout, `<ns>` is the namespace and `<host>` the review hostname, and the
+commands use the names a release called `c11n` produces. Read the next section
+before copying one.
+
+## Object names (why they are `c11n-…`, not `<release>-c11n-…`)
+
+Every object name comes from Helm's `fullname`, which is the **release name**
+when that already contains the chart name, and `<release>-c11n` otherwise:
+
+| Object | Release `c11n` | Release `c11n-acme` |
+|---|---|---|
+| Deployment / Service / Ingress / NetworkPolicy | `c11n` | `c11n-acme` |
+| admin Ingress | `c11n-admin` | `c11n-acme-admin` |
+| PVC | `c11n-pb-data` | `c11n-acme-pb-data` |
+| credentials Secret | `c11n-secrets` | `c11n-acme-secrets` |
+
+So a release named `c11n` has a Deployment called `c11n` (there is no
+`c11n-c11n`), and its PVC is `c11n-pb-data`. If your release is named
+differently, substitute that fullname; `helm template <release> deploy/helm/c11n
+--set host=… --set upstream.url=… --set owner.email=… | grep '^  name:'` prints
+the exact set.
 
 ---
 
@@ -34,7 +53,7 @@ would deploy the previous release's images. The `chart` job in
 when they disagree.
 
 ```sh
-helm upgrade --install <rel> deploy/helm/c11n \
+helm upgrade --install c11n deploy/helm/c11n \
   --namespace <ns> --create-namespace \
   --set host=review.example.com \
   --set upstream.url=https://staging.example.com \
@@ -68,7 +87,10 @@ Where the environment differs, it is a value — nothing is hardcoded:
 | network policy | `networkPolicy.enabled` (default false), `networkPolicy.ingressNamespace`, `networkPolicy.ingressPodSelector` |
 
 On a disposable test cluster (closedcloud), `scripts/cluster/install-closedcloud.sh`
-does the whole install, including building the images in-cluster.
+does the whole install, including building the images in-cluster. It pins the
+images by digest (`closedcloud build`'s `reference`) so a rebuild of the same
+commit is never masked by `IfNotPresent`, and it leaves the admin Ingress **off**
+(`ADMIN_INGRESS=1` turns it on) — the port-forward below is the default way in.
 
 ## 2. Getting the owner link (the only way in)
 
@@ -78,7 +100,7 @@ triggers it), and its single-use sign-in link is printed to the **pocketbase
 container's stdout** — not to the database.
 
 ```sh
-kubectl logs deploy/<rel> -n <ns> -c pocketbase | grep 'c11n bootstrap'
+kubectl logs deploy/c11n -n <ns> -c pocketbase | grep 'c11n bootstrap'
 ```
 
 That prints something like:
@@ -91,7 +113,7 @@ Copy the whole URL **now**: the raw token exists only in that line (the database
 stores its sha256), it is single use, and it expires after `invite.ttlHours`
 (72 h default).
 
-- Pod already restarted? `kubectl logs deploy/<rel> -c pocketbase --previous`.
+- Pod already restarted? `kubectl logs deploy/c11n -c pocketbase --previous`.
 - Line gone for good? Ask an existing owner/team member for a fresh link
   (overlay → Invite), or mint one yourself — see §8.
 - Nothing there yet? The line appears on the first request. The readiness probe
@@ -120,7 +142,7 @@ run, readiness returns). Announce it for a client-facing review site.
 
 ```sh
 # 1. new images exist (a v* tag builds both)
-helm upgrade <rel> deploy/helm/c11n -n <ns> --reuse-values \
+helm upgrade c11n deploy/helm/c11n -n <ns> --reuse-values \
   --set caddy.image.tag=1.2.3 --set pocketbase.image.tag=1.2.3 \
   --wait --timeout 10m
 ```
@@ -167,14 +189,14 @@ backup:
   — keep a second, independent copy of critical sites (bucket versioning, or a
   `kubectl cp` of a manual backup, see 5.2).
 
-Check it worked: `kubectl exec deploy/<rel> -c pocketbase -- ls /pb/pb_data/backups`
+Check it worked: `kubectl exec deploy/c11n -c pocketbase -- ls /pb/pb_data/backups`
 (local copies are kept too) and look in the bucket. Failures show in the
 pocketbase log (`kubectl logs … | grep -i backup`).
 
 ### 5.2 A manual backup (admin UI, no S3 needed)
 
 ```sh
-kubectl port-forward deploy/<rel> -n <ns> 8090:8090
+kubectl port-forward deploy/c11n -n <ns> 8090:8090
 # open http://127.0.0.1:8090/_/  (superuser account, see §8)
 # Settings → Backups → "Create backup", then download the zip
 ```
@@ -204,7 +226,7 @@ gone; that is expected.
      (the pod runs as uid 65532; the directory is writable by it).
 3. Restore. It is asynchronous: PocketBase unpacks the zip and re-execs. Watch
    for restarts and a second "Server started" line:
-   `kubectl logs -f deploy/<rel> -c pocketbase`.
+   `kubectl logs -f deploy/c11n -c pocketbase`.
 4. Verify: sign in with the owner link from that backup (it was single use, so
    mint a new one — §8), and check the overlays' comments are the expected set.
 5. A restore of a backup taken on a **different image version** runs that
@@ -214,7 +236,7 @@ gone; that is expected.
 
 | Secret | Where it lives | How to rotate |
 |---|---|---|
-| S3 access key / secret | chart Secret `<rel>-c11n-secrets` (from values) | change `backup.s3.accessKey/secretKey`, `helm upgrade --reuse-values --set …`; the hook re-applies settings on the next pod start (it is a one-shot per process) |
+| S3 access key / secret | chart Secret `c11n-secrets` (from values) | change `backup.s3.accessKey/secretKey`, `helm upgrade --reuse-values --set …`; the hook re-applies settings on the next pod start (it is a one-shot per process) |
 | PocketBase superuser password | the database | admin UI → superuser → change password, or `kubectl exec … -- /pb/pocketbase superuser update <email> <password> --dir=/pb/pb_data` |
 | SMTP password | chart Secret (inert today) | change the value; nothing reads it yet |
 | Session cookies | — | rotate `session.ttlDays` (shorter sessions) and restart; existing cookies keep their original expiry. There is no server-side session revocation: a stolen cookie is valid until it expires. Removing the user does invalidate it (the gate re-reads the user). |
@@ -229,7 +251,7 @@ The admin UI is **not** on the review host: Caddy answers 404 for
 `/__c11n/pb/_/*` on purpose. Use a port-forward:
 
 ```sh
-kubectl port-forward deploy/<rel> -n <ns> 8090:8090
+kubectl port-forward deploy/c11n -n <ns> 8090:8090
 # http://127.0.0.1:8090/_/
 ```
 
@@ -258,7 +280,7 @@ the overlay (**Invite** → same email → copy the link).
 If nobody can sign in (or the owner account is gone), mint one from the pod:
 
 ```sh
-kubectl exec deploy/<rel> -n <ns> -c pocketbase -- \
+kubectl exec deploy/c11n -n <ns> -c pocketbase -- \
   /pb/pocketbase superuser upsert admin@example.com 'a-long-password' --dir=/pb/pb_data
 ```
 
@@ -300,9 +322,9 @@ sends you straight back.
 Diagnose from inside the pod:
 
 ```sh
-kubectl exec deploy/<rel> -c caddy -- wget -qO- --header 'Host: <host>' http://127.0.0.1:8080/__c11n/auth/
-kubectl exec deploy/<rel> -c pocketbase -- wget -qO- http://127.0.0.1:8090/api/health
-kubectl logs deploy/<rel> -c pocketbase | tail -50      # claim refusals are logged
+kubectl exec deploy/c11n -c caddy -- wget -qO- --header 'Host: <host>' http://127.0.0.1:8080/__c11n/auth/
+kubectl exec deploy/c11n -c pocketbase -- wget -qO- http://127.0.0.1:8090/api/health
+kubectl logs deploy/c11n -c pocketbase | tail -50      # claim refusals are logged
 ```
 
 ### 502/503 from the ingress
@@ -311,8 +333,8 @@ The caddy container is up but PocketBase is not (Caddy gates through it), or the
 upstream is unreachable. Check both containers' readiness, then:
 
 ```sh
-kubectl logs deploy/<rel> --all-containers --prefix
-kubectl exec deploy/<rel> -c caddy -- wget -qO- --spider <upstream.url>
+kubectl logs deploy/c11n --all-containers --prefix
+kubectl exec deploy/c11n -c caddy -- wget -qO- --spider <upstream.url>
 ```
 
 ### Upstream TLS errors
@@ -341,23 +363,37 @@ volume: SQLite on a network filesystem corrupts.
 ## 10. Uninstall
 
 ```sh
-helm uninstall <rel> -n <ns>
+helm uninstall c11n -n <ns>
 ```
 
 What happens to the data: the PVC is annotated
 `helm.sh/resource-policy: keep`, so **`helm uninstall` leaves both the claim and
-its volume behind**. A reinstall re-adopts the claim and the site comes back
-exactly as it was.
+its volume behind** — and, because the claim keeps the previous release's
+ownership metadata, a plain reinstall refuses to adopt it.
+
+Reinstall over the retained claim (Helm 4), with the SAME release name and
+namespace plus the ownership hand-over:
+
+```sh
+helm upgrade --install c11n deploy/helm/c11n -n <ns> --take-ownership \
+  -f site-values.yaml --wait --timeout 10m
+```
+
+`--take-ownership` is Helm 4's flag for exactly this: it lets the release adopt
+an object that already carries another release's (or no) annotations. Without it
+the install fails with an "already exists and cannot be imported into the current
+release" ownership error. The site comes back exactly as it was, because the
+volume was never touched — the migrations are already at the release's version.
 
 To delete everything, including the reviewed site's data:
 
 ```sh
-helm uninstall <rel> -n <ns>
-kubectl delete pvc <rel>-c11n-pb-data -n <ns>
+helm uninstall c11n -n <ns>
+kubectl delete pvc c11n-pb-data -n <ns>
 # the StorageClass's reclaim policy then decides the volume's fate (Delete on
 # most dynamic provisioners; `kubectl get pv` to confirm nothing is orphaned)
 ```
 
-The chart's Secret (`<rel>-c11n-secrets`) goes with the release, as does the
+The chart's Secret (`c11n-secrets`) goes with the release, as does the
 Service and the Ingress. Take a backup first if the data matters — this is the
 step with no undo.

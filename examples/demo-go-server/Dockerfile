@@ -28,12 +28,15 @@ RUN npm run build -w examples/demo-vue
 # ---- 2. the server ----------------------------------------------------------
 FROM golang:${GO_VERSION}-alpine AS server
 ARG GO_VERSION
-WORKDIR /src
+# WORKDIR is the MODULE directory, not the repo root: the repo root has no
+# go.mod (the server is its own module), so `go build ./examples/demo-go-server`
+# from /src fails with "go.mod file not found in current directory or any parent
+# directory" - which is exactly what the in-cluster arm64 build hit.
+WORKDIR /src/examples/demo-go-server
 # Stdlib only (no go.sum, no module downloads): copy the module and build it.
-COPY examples/demo-go-server/go.mod examples/demo-go-server/
-COPY examples/demo-go-server/*.go examples/demo-go-server/
-RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" \
-      -o /out/demo-go-server ./examples/demo-go-server
+COPY examples/demo-go-server/go.mod ./
+COPY examples/demo-go-server/*.go ./
+RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/demo-go-server .
 
 # ---- 3. runtime -------------------------------------------------------------
 FROM gcr.io/distroless/static-debian12:nonroot

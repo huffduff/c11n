@@ -15,6 +15,7 @@
 import { execFileSync } from 'node:child_process'
 import fs from 'node:fs'
 import path from 'node:path'
+import { destructiveRefusal } from './external-guard'
 
 const repoRoot = path.resolve(__dirname, '..')
 const stackScript = path.join(repoRoot, 'scripts', 'stack.sh')
@@ -52,6 +53,11 @@ export default async function globalSetup(): Promise<void> {
     }
     const baseUrl = process.env.C11N_E2E_BASE_URL!.replace(/\/+$/, '')
     const pbUrl = process.env.C11N_E2E_PB_URL!.replace(/\/+$/, '')
+    // Before probing anything: is this deployment allowed to be wiped? The
+    // suite deletes every comment and reply (resetData), so a real review site
+    // must be refused here, once, with the reason - not half way through a run.
+    const refusal = destructiveRefusal()
+    if (refusal) throw new Error(refusal)
     // The sign-in page is the one ungated route, so this is a real answer and
     // not a 401 from the gate.
     await probe(`${baseUrl}/__c11n/auth/`, 'the proxy')

@@ -141,7 +141,26 @@ function codeLines(text) {
   // Non-root contract: numeric uid, a pre-created data dir, and the volume
   // path the chart mounts.
   check(/^USER 65532:65532$/m.test(dockerfile), 'pocketbase image runs as uid 65532')
-  check(codeLines(dockerfile).includes('chown -R 65532:65532 /pb'), 'pocketbase owns /pb (including pb_data)')
+  // Ownership is established where the bytes land, not by a later `chown -R`
+  // that a COPY would undo: the binary, migrations and hooks are COPYd with
+  // --chown, and the one writable directory is chowned explicitly.
+  check(
+    /^COPY --from=fetch --chown=65532:65532 \/out\/pocketbase \/pb\/pocketbase$/m.test(dockerfile),
+    'pocketbase binary is COPYd with --chown=65532',
+  )
+  check(
+    /^COPY --chown=65532:65532 pb_migrations \/pb\/pb_migrations$/m.test(dockerfile),
+    'pocketbase migrations are COPYd with --chown=65532',
+  )
+  check(
+    /^COPY --chown=65532:65532 pb_hooks \/pb\/pb_hooks$/m.test(dockerfile),
+    'pocketbase hooks are COPYd with --chown=65532',
+  )
+  check(codeLines(dockerfile).includes('chown 65532:65532 /pb/pb_data'), 'pocketbase owns the data dir')
+  // unzip is a download-stage tool only: it does not ship. (wget is busybox's,
+  // so the runbook's `kubectl exec … -- wget` still works in the runtime image.)
+  const runtimeStage = dockerfile.slice(dockerfile.lastIndexOf('FROM alpine:'))
+  check(!/apk add[^\n]*unzip/.test(runtimeStage), 'unzip is not installed in the runtime stage')
   check(dockerfile.includes('--dir=/pb/pb_data'), 'pocketbase stores data at /pb/pb_data')
   check(/^EXPOSE 8090$/m.test(dockerfile), 'pocketbase exposes 8090')
 }

@@ -4,6 +4,11 @@
 # environments is here; the templates hardcode no host, class, issuer, storage
 # class, image or credential.
 #
+# Two workloads since the 2026-11-26 revision of ADR 0005: a stateless caddy
+# Deployment (the proxy) and a single-replica pocketbase StatefulSet (the data).
+# Both pods carry app.kubernetes.io/component, and the NetworkPolicies select
+# on it.
+#
 # Minimum to install:
 #
 #   host: review.example.com
@@ -51,7 +56,7 @@ tls:
 
 # ---- the upstream under review --------------------------------------------
 upstream:
-  # REQUIRED. Reachable from the caddy container. http:// or https://.
+  # REQUIRED. Reachable from the caddy pod. http:// or https://.
   url: ""
   # verify   - normal certificate verification (default)
   # insecure - skip verification, for a self-signed https upstream. Caddy
@@ -85,25 +90,57 @@ cookie:
   # It also feeds the publicUrl scheme default (see above).
   secure: true
 
-# ---- images ----------------------------------------------------------------
-# Both default to GHCR and to the chart's appVersion, so a release tag installs
-# the pair of images built for it (see .github/workflows/release.yml).
+# ---- images and per-component settings -------------------------------------
+# Both images default to GHCR and to the chart's appVersion, so a release tag
+# installs the pair of images built for it (see .github/workflows/release.yml).
 #
 # `digest` (optional) pins the exact image: when set it wins over `tag` and
 # renders `repository@digest`. The closedcloud install script uses it, because
 # a tag plus IfNotPresent is how a rebuilt image gets silently reused.
 caddy:
+  # The proxy is stateless: any replica count is correct and a rolling update
+  # needs no outage. Raise this (2+) so a node drain cannot 503 the site, and
+  # turn caddy.pdb on at the same time.
+  replicas: 1
   image:
     repository: ghcr.io/huffduff/c11n-caddy
     # Empty = .Chart.AppVersion.
     tag: ""
     # e.g. sha256:6f1c… Empty = build the reference from repository + tag.
     digest: ""
+  # Per-component overrides; empty ({}, []) = the top-level values below.
+  # Sizing the proxy separately from the database is the point of the split:
+  # caddy is CPU-cheap and memory-flat, pocketbase is neither.
+  resources: {}
+  #   resources:
+  #     requests: { cpu: 50m, memory: 64Mi }
+  #     limits: { memory: 256Mi }
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+  pdb:
+    # Off by default: a minAvailable 1 budget on a single-replica Deployment
+    # blocks every node drain (the pod can never be evicted). Turn it on with
+    # caddy.replicas >= 2.
+    enabled: false
+    minAvailable: 1
+    # Set this instead of minAvailable for a "lose at most N" budget.
+    maxUnavailable: ""
+
 pocketbase:
   image:
     repository: ghcr.io/huffduff/c11n-pocketbase
     tag: ""
     digest: ""
+  # Per-component overrides; empty = the top-level values below.
+  resources: {}
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+  # There is deliberately no `replicas` here: the StatefulSet's is hardcoded
+  # to 1. SQLite has a single writer, so a second pod against the same volume
+  # corrupts the review site's data. check-chart fails if a value ever moves it
+  # off 1.
 
 image:
   # Always IfNotPresent: a moving tag would silently re-pull a different image
@@ -113,6 +150,10 @@ image:
 imagePullSecrets: []
 
 # ---- storage ---------------------------------------------------------------
+# The pocketbase StatefulSet's volumeClaimTemplate; the claim it creates is
+# pb-data-<fullname>-pocketbase-0. Both values are read when the claim is first
+# created: changing `size` later does NOT grow an existing volume (see
+# docs/runbook.md §5).
 persistence:
   # Empty = the cluster's default StorageClass.
   #
@@ -122,8 +163,10 @@ persistence:
   storageClass: ""
   size: 10Gi
 
-# ---- placement and sizing --------------------------------------------------
-# Separate resources per container: pocketbase is the one with the data.
+# ---- placement and sizing (the defaults for BOTH workloads) ---------------
+# Override per component with caddy.resources / pocketbase.resources (and the
+# nodeSelector / tolerations / affinity equivalents): that is what to use when,
+# say, only the database needs more memory or a different node pool.
 resources:
   caddy:
     requests:
@@ -167,7 +210,7 @@ backup:
     endpoint: ""
     bucket: ""
     region: ""
-    # Rendered into a chart-managed Secret, never into the Deployment. Note
+    # Rendered into a chart-managed Secret, never into the StatefulSet. Note
     # that Helm also stores the release values in a Secret in the release
     # namespace, so these are only as private as the cluster's Secret access.
     accessKey: ""
@@ -199,6 +242,9 @@ smtp:
 # the superuser login on a real hostname: anyone who guesses the admin path can
 # brute-force it, so it needs its own TLS, IP allowlist or auth proxy. The
 # warning is repeated in the rendered object's annotation.
+#
+# The Ingress points straight at the pocketbase Service (bypassing caddy), and
+# it is the only reason the NetworkPolicy opens 8090 to the ingress controller.
 adminIngress:
   enabled: false
   host: ""
@@ -214,24 +260,34 @@ adminIngress:
     secretName: ""
 
 # ---- network policy --------------------------------------------------------
-# Off by default (a NetworkPolicy needs a CNI that enforces it, and a wrong
-# selector takes the site down). When on, it allows ingress to the pod ONLY on
-# the caddy port (8080) from the ingress controller's namespace - plus 8090
-# when adminIngress.enabled - and denies everything else.
+# ON by default (2026-11-26 revision). The split gave each workload its own
+# port, so the policy is now two rules instead of a guess about one pod:
 #
-# Without it, PocketBase's port 8090 is reachable on the pod IP from anywhere
-# in the cluster: there is no Service for it, but pods do not need one.
+#   pocketbase:8090   only from caddy pods; plus the ingress controller's
+#                     namespace when adminIngress.enabled
+#   caddy:8080        only from the ingress controller's namespace, plus any
+#                     ingressPodSelector / additionalAllowedCidrs below
+#
+# Egress is NOT restricted: caddy proxies to an arbitrary upstream and
+# pocketbase uploads to an arbitrary S3 endpoint.
+#
+# A wrong value here is an outage, not a hole: if the controller is not in
+# `ingressNamespace`, it cannot reach caddy and every request is a 504 while
+# both pods stay Ready (their probes are local). Enforcement is the CNI's job:
+# k3s ships a network-policy controller and enforces this out of the box; a CNI
+# without one ignores the object.
 networkPolicy:
-  enabled: false
-  # Namespace the ingress controller runs in (k3s/Traefik: kube-system,
-  # ingress-nginx: ingress-nginx). Matched on the automatic
-  # kubernetes.io/metadata.name label.
-  ingressNamespace: ingress-nginx
+  enabled: true
+  # Namespace the ingress controller runs in. k3s/Traefik: kube-system (the k3s
+  # default, and this chart's default). ingress-nginx: ingress-nginx. Matched
+  # on the automatic kubernetes.io/metadata.name label.
+  ingressNamespace: kube-system
   # Optional: narrow it to the controller's pods, e.g.
   #   ingressPodSelector: { app.kubernetes.io/name: traefik }
   # Empty = any pod in the namespace.
   ingressPodSelector: {}
-  # Optional extra sources, as CIDRs. `kubectl port-forward` arrives from the
-  # node, and whether a CNI treats that as "outside the cluster" varies: add the
-  # node subnet here if port-forward must keep working with the policy on.
+  # Optional extra sources for BOTH policies, as CIDRs: an external load
+  # balancer that talks to the nodes, or the node subnet if `kubectl
+  # port-forward` turns out to be filtered by your CNI (port-forward traffic is
+  # usually not subject to NetworkPolicy, but that is CNI-dependent).
   additionalAllowedCidrs: []

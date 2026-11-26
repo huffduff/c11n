@@ -1,12 +1,15 @@
-# Chart verification values: cert-manager + the admin UI published + a
-# NetworkPolicy.
+# Chart verification values: cert-manager + the admin UI published + the
+# NetworkPolicy narrowed to the controller's pods.
 #
-# Two things this file exists for:
+# What this file exists for:
 #   * the admin Ingress gets its OWN TLS Secret. cert-manager writes one
 #     certificate per Secret, so a shared name means the two Ingresses overwrite
 #     each other's certificate. check-chart asserts the two names differ.
-#   * networkPolicy.enabled=true renders one, scoped to the ingress controller's
-#     namespace and narrowed to its pods.
+#   * the admin Ingress points at the pocketbase Service, and the NetworkPolicy
+#     therefore has to allow the ingress controller to reach 8090 - the only
+#     case where it does.
+#   * caddy scaled to 2 with a PodDisruptionBudget: the one shape where the
+#     budget is not a drain-blocking mistake.
 # The image digests prove `digest` wins over `tag` and renders repo@digest.
 host: review.example.com
 
@@ -36,6 +39,9 @@ networkPolicy:
     - 10.0.0.0/8
 
 caddy:
+  replicas: 2
+  pdb:
+    enabled: true
   image:
     digest: sha256:1111111111111111111111111111111111111111111111111111111111111111
 pocketbase:

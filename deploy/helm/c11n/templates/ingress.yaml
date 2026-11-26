@@ -28,7 +28,7 @@ spec:
             pathType: Prefix
             backend:
               service:
-                name: {{ include "c11n.fullname" . }}
+                name: {{ include "c11n.fullname" . }}-caddy
                 port:
                   name: http
   {{- if ne .Values.tls.mode "none" }}

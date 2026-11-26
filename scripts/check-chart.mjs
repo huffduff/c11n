@@ -211,6 +211,34 @@ for (const guard of guards) {
   check(failed && message.includes(guard.expect), `guard: ${guard.name} fails the render`, failed ? res.stderr : res.stderr.slice(0, 1500) || '<render succeeded>')
 }
 
+// ---- invariants a values file must not be able to break ---------------------
+// The single-writer rule is the one safety property of this chart that a
+// well-meaning `--set` could quietly destroy (two pods, one SQLite file). It is
+// hardcoded in the template, and this proves it stays hardcoded: the value is
+// not exposed, so Helm ignores it and the StatefulSet still renders 1.
+{
+  const res = helm([
+    'template', RELEASE, chartDir, '--namespace', NAMESPACE, '--values', base,
+    '--set', 'pocketbase.replicas=3',
+  ])
+  const sts = documents(res.stdout).find((doc) => kindOf(doc) === 'StatefulSet') ?? ''
+  check(
+    res.status === 0 && /^  replicas:\s*1$/m.test(sts),
+    'guard: pocketbase.replicas cannot move the StatefulSet off 1',
+    res.status !== 0 ? res.stderr : 'the render honoured an override',
+  )
+}
+
+// The policy is on by default, but the opt-out has to be real: a chart that
+// renders a NetworkPolicy no matter what cannot be installed on a CNI that
+// does not enforce them (where the object is harmless) or debugged when a
+// wrong ingressNamespace is suspected.
+{
+  const res = helm(['template', RELEASE, chartDir, '--namespace', NAMESPACE, '--values', base, '--set', 'networkPolicy.enabled=false'])
+  const count = documents(res.stdout).filter((doc) => kindOf(doc) === 'NetworkPolicy').length
+  check(res.status === 0 && count === 0, 'guard: networkPolicy.enabled=false renders no NetworkPolicy', `rendered ${count}`)
+}
+
 // ---- rendered objects that must agree with each other -----------------------
 // A snapshot says "the render changed"; these say "the render is consistent",
 // which is the class of bug a snapshot cannot describe: a Deployment that
@@ -290,11 +318,119 @@ for (const [label, text] of renders) {
     )
   }
 
-  // No pod in this chart may carry a usable API token.
+  // ---- the split layout ----------------------------------------------------
+  // caddy is a stateless Deployment; pocketbase is a one-replica StatefulSet
+  // that owns the claim. These are the assertions that keep the two from
+  // growing back together: a PVC object, a pb-data mount on the proxy, a
+  // pocketbase Service that is not ClusterIP, an Ingress pointing at it
+  // without the admin opt-in, or a StatefulSet someone can scale off 1.
   const deployments = docs.filter((doc) => kindOf(doc) === 'Deployment')
+  const statefulsets = docs.filter((doc) => kindOf(doc) === 'StatefulSet')
+  const services = docs.filter((doc) => kindOf(doc) === 'Service')
+  const ingresses = docs.filter((doc) => kindOf(doc) === 'Ingress')
+
+  // No pod in this chart may carry a usable API token - on either workload.
+  const workloads = [...deployments, ...statefulsets]
   check(
-    deployments.length > 0 && deployments.every((doc) => /^\s{6}automountServiceAccountToken:\s*false$/m.test(doc)),
-    `${label}: automountServiceAccountToken is false`,
+    workloads.length > 0 && workloads.every((doc) => /^\s{6}automountServiceAccountToken:\s*false$/m.test(doc)),
+    `${label}: automountServiceAccountToken is false on every workload`,
+  )
+
+  check(
+    !docs.some((doc) => kindOf(doc) === 'PersistentVolumeClaim'),
+    `${label}: no PersistentVolumeClaim object (the StatefulSet's volumeClaimTemplate owns pb_data)`,
+  )
+
+  const caddyDeploy = deployments.find((doc) => metadataName(doc).endsWith('-caddy'))
+  check(caddyDeploy !== undefined, `${label}: a caddy Deployment exists`)
+  if (caddyDeploy) {
+    check(
+      !/pb-data|persistentVolumeClaim|claimName:/.test(caddyDeploy),
+      `${label}: the caddy Deployment mounts no pb_data volume`,
+    )
+    check(/strategy:\n\s+type: RollingUpdate/m.test(caddyDeploy), `${label}: caddy rolls (RollingUpdate, never Recreate)`)
+  }
+
+  const pbSts = statefulsets.find((doc) => metadataName(doc).endsWith('-pocketbase'))
+  check(pbSts !== undefined, `${label}: a pocketbase StatefulSet exists`)
+  if (pbSts) {
+    check(
+      /^  replicas:\s*1$/m.test(pbSts),
+      `${label}: pocketbase replicas is hardcoded to 1 (SQLite has a single writer)`,
+    )
+    check(
+      /\n  volumeClaimTemplates:/.test(pbSts) && /name: pb-data/.test(pbSts),
+      `${label}: pocketbase owns pb_data through volumeClaimTemplates`,
+    )
+    check(
+      /whenDeleted: Retain/.test(pbSts) && /whenScaled: Retain/.test(pbSts),
+      `${label}: pb_data is retained when the StatefulSet is deleted or scaled`,
+    )
+    const govern = pbSts.match(/^  serviceName:\s*(\S+)$/m)?.[1] ?? ''
+    const svcNames = services.map((doc) => metadataName(doc))
+    check(
+      govern !== '' && svcNames.includes(govern) && /clusterIP:\s*None/.test(services.find((doc) => metadataName(doc) === govern) ?? ''),
+      `${label}: the StatefulSet's serviceName is a rendered headless Service (${govern || 'none'})`,
+    )
+  }
+
+  // Service types and Ingress backends must agree. The review Ingress has to
+  // reach caddy; the pocketbase Service is internal, and the only Ingress
+  // allowed to name it is the admin one (which carries the warning annotation
+  // and only renders when adminIngress.enabled).
+  const svcTypes = new Map()
+  const svcPorts = new Map()
+  for (const doc of services) {
+    const name = metadataName(doc)
+    svcTypes.set(name, doc.match(/^  type:\s*(\S+)$/m)?.[1] ?? '')
+    const portsBlock = doc.match(/^  ports:\n((?:\s{4}.*\n)+)/m)?.[1] ?? ''
+    svcPorts.set(name, [...portsBlock.matchAll(/- name:\s*(\S+)/g)].map((m) => m[1]))
+  }
+  const backends = [
+    ...text.matchAll(/backend:\n\s+service:\n\s+name:\s*(\S+)\n\s+port:\n\s+name:\s*(\S+)/g),
+  ].map((m) => ({ name: m[1], port: m[2] }))
+  const unresolved = backends.filter((b) => !svcTypes.has(b.name) || !(svcPorts.get(b.name) ?? []).includes(b.port))
+  check(
+    backends.length > 0 && unresolved.length === 0,
+    `${label}: every Ingress backend is a rendered Service with that port name`,
+    unresolved.map((b) => `${b.name}:${b.port}`).join(', '),
+  )
+
+  const pbSvc = [...svcTypes.keys()].find((name) => name.endsWith('-pocketbase'))
+  check(
+    pbSvc !== undefined && svcTypes.get(pbSvc) === 'ClusterIP',
+    `${label}: the pocketbase Service is ClusterIP (internal only, never NodePort/LoadBalancer)`,
+  )
+  const directExposure = ingresses.filter((doc) => /service:\n\s+name:\s*\S*-pocketbase\b/.test(doc))
+  check(
+    directExposure.every((doc) => /c11n\.io\/warning/.test(doc)),
+    `${label}: the pocketbase Service is behind an Ingress only when adminIngress is on`,
+  )
+
+  // The NetworkPolicy is ON by default: two objects, each scoped to its own
+  // component, and pocketbase opens 8090 to caddy pods and nothing else.
+  const policies = docs.filter((doc) => kindOf(doc) === 'NetworkPolicy')
+  check(
+    policies.length === 2,
+    `${label}: NetworkPolicy renders by default (${policies.map(metadataName).join(', ') || 'none'})`,
+  )
+  const pbPolicy = policies.find((doc) => metadataName(doc).endsWith('-pocketbase')) ?? ''
+  const caddyPolicy = policies.find((doc) => metadataName(doc).endsWith('-caddy')) ?? ''
+  check(
+    /component: pocketbase/.test(pbPolicy) && /port:\s*8090/.test(pbPolicy) && !/port:\s*8080/.test(pbPolicy),
+    `${label}: the pocketbase policy admits 8090 only`,
+  )
+  check(
+    /from:\n\s+- podSelector:/.test(pbPolicy) && /component: caddy/.test(pbPolicy),
+    `${label}: the pocketbase policy admits caddy pods by component label`,
+  )
+  check(
+    /namespaceSelector:/.test(caddyPolicy) && /port:\s*8080/.test(caddyPolicy) && !/port:\s*8090/.test(caddyPolicy),
+    `${label}: the caddy policy admits the ingress controller on 8080 only`,
+  )
+  check(
+    !/policyTypes:\n\s+- Egress/.test(pbPolicy + caddyPolicy),
+    `${label}: the policies restrict ingress only (caddy needs an arbitrary upstream, pocketbase an S3 endpoint)`,
   )
 }
 

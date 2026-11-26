@@ -2,7 +2,8 @@
 #
 # The closedcloud test-cluster shape (5.5): plain http behind Traefik with
 # cookie.secure=false, no backups, and an admin Ingress so the render covers
-# the second Ingress and the extra Service port.
+# the second Ingress and the NetworkPolicy's 8090 rule. networkPolicy is left
+# at its default (on, kube-system): this is the file that proves the default.
 host: c11n.closedcloud.test
 
 publicUrl: http://c11n.closedcloud.test

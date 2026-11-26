@@ -3,24 +3,81 @@
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
-  name: c11n
+  name: c11n-pocketbase
   labels:
     helm.sh/chart: "c11n-0.1.0"
     app.kubernetes.io/name: c11n
     app.kubernetes.io/instance: c11n
     app.kubernetes.io/version: "0.1.0"
     app.kubernetes.io/managed-by: Helm
-    app.kubernetes.io/component: proxy
+    app.kubernetes.io/component: pocketbase
   annotations:
     c11n.io/why: >-
-      Ingress to this pod is limited to the caddy port from the ingress
-      controller namespace; PocketBase's 8090 is otherwise reachable on the pod
-      IP from anywhere in the cluster.
+      Only caddy pods (and the ingress controller, when the admin Ingress is
+      enabled) may reach PocketBase on 8090. PocketBase has no business being
+      reachable from every pod in the cluster.
 spec:
   podSelector:
     matchLabels:
       app.kubernetes.io/name: c11n
       app.kubernetes.io/instance: c11n
+      app.kubernetes.io/component: pocketbase
+  policyTypes:
+    - Ingress
+  ingress:
+    # (a) the proxy. A bare podSelector means "in THIS namespace", which is
+    # what makes this safe: another release's caddy pods carry a different
+    # app.kubernetes.io/instance and never match.
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: c11n
+              app.kubernetes.io/instance: c11n
+              app.kubernetes.io/component: caddy
+      ports:
+        - protocol: TCP
+          port: 8090
+    # The admin Ingress (an explicit opt-in) publishes the superuser UI: it
+    # comes in through the ingress controller, so the controller's namespace
+    # needs 8090 too. Without adminIngress this rule does not exist, so the
+    # controller cannot reach PocketBase on any port.
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: "kube-system"
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: traefik
+        - ipBlock:
+            cidr: "10.0.0.0/8"
+      ports:
+        - protocol: TCP
+          port: 8090
+
+---
+# Source: c11n/templates/networkpolicy.yaml
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: c11n-caddy
+  labels:
+    helm.sh/chart: "c11n-0.1.0"
+    app.kubernetes.io/name: c11n
+    app.kubernetes.io/instance: c11n
+    app.kubernetes.io/version: "0.1.0"
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/component: caddy
+  annotations:
+    c11n.io/why: >-
+      The review origin answers only the ingress controller (plus any CIDR or
+      pod selector the operator adds). Egress is unrestricted on purpose: the
+      proxy has to reach the reviewed upstream and PocketBase.
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: c11n
+      app.kubernetes.io/instance: c11n
+      app.kubernetes.io/component: caddy
   policyTypes:
     - Ingress
   ingress:
@@ -36,124 +93,165 @@ spec:
       ports:
         - protocol: TCP
           port: 8080
-        # The admin Ingress is an explicit opt-in that publishes 8090; it comes
-        # in through the same controller, so the same source is allowed on it.
-        - protocol: TCP
-          port: 8090
 
 ---
-# Source: c11n/templates/pvc.yaml
-apiVersion: v1
-kind: PersistentVolumeClaim
+# Source: c11n/templates/caddy-pdb.yaml
+apiVersion: policy/v1
+kind: PodDisruptionBudget
 metadata:
-  name: c11n-pb-data
+  name: c11n-caddy
   labels:
     helm.sh/chart: "c11n-0.1.0"
     app.kubernetes.io/name: c11n
     app.kubernetes.io/instance: c11n
     app.kubernetes.io/version: "0.1.0"
     app.kubernetes.io/managed-by: Helm
-    app.kubernetes.io/component: proxy
-  annotations:
-    # helm uninstall removes the release's objects but never a PVC's underlying
-    # volume, so the data survives an uninstall. The claim also KEEPS the
-    # release's ownership annotations, which is why a reinstall needs
-    # `helm upgrade --install <rel> ... --take-ownership` (Helm 4): without it
-    # helm refuses to adopt an object that belongs to a release it does not
-    # know. Deleting the PVC is a separate, explicit step (docs/runbook.md §10).
-    helm.sh/resource-policy: keep
+    app.kubernetes.io/component: caddy
 spec:
-  accessModes:
-    - ReadWriteOnce
-  storageClassName: "local-path"
-  resources:
-    requests:
-      storage: 5Gi
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: c11n
+      app.kubernetes.io/instance: c11n
+      app.kubernetes.io/component: caddy
 
 ---
 # Source: c11n/templates/service.yaml
 apiVersion: v1
 kind: Service
 metadata:
-  name: c11n
+  name: c11n-caddy
   labels:
     helm.sh/chart: "c11n-0.1.0"
     app.kubernetes.io/name: c11n
     app.kubernetes.io/instance: c11n
     app.kubernetes.io/version: "0.1.0"
     app.kubernetes.io/managed-by: Helm
-    app.kubernetes.io/component: proxy
+    app.kubernetes.io/component: caddy
 spec:
-  # ClusterIP only: the Ingress is the public door, and the PocketBase admin is
-  # reached with kubectl port-forward (NOTES.txt), not through this Service.
   type: ClusterIP
   selector:
     app.kubernetes.io/name: c11n
     app.kubernetes.io/instance: c11n
+    app.kubernetes.io/component: caddy
   ports:
     - name: http
       port: 8080
       targetPort: http
       protocol: TCP
-    # Only when the admin Ingress is explicitly enabled does the admin port
-    # become reachable through a Service at all. It is a real risk: see the
-    # warning on the Ingress below and in values.yaml.
-    - name: pb-admin
-      port: 8090
-      targetPort: pb
-      protocol: TCP
 
 ---
-# Source: c11n/templates/deployment.yaml
-apiVersion: apps/v1
-kind: Deployment
+# Source: c11n/templates/service.yaml
+apiVersion: v1
+kind: Service
 metadata:
-  name: c11n
+  name: c11n-pocketbase
   labels:
     helm.sh/chart: "c11n-0.1.0"
     app.kubernetes.io/name: c11n
     app.kubernetes.io/instance: c11n
     app.kubernetes.io/version: "0.1.0"
     app.kubernetes.io/managed-by: Helm
-    app.kubernetes.io/component: proxy
+    app.kubernetes.io/component: pocketbase
+  annotations:
+    c11n.io/internal: >-
+      Cluster-internal. Caddy reaches it as c11n-pocketbase:8090 and the
+      optional admin Ingress points at it; the NetworkPolicy is what limits who
+      may dial it.
 spec:
-  # HARDCODED, not a value: PocketBase is SQLite, which has a single writer.
-  # Two pods against one PVC corrupt it, and two pods with two PVCs are two
-  # different review sites. One review site = one release = one pod (ADR 0005).
-  replicas: 1
-  # Recreate, never RollingUpdate: the old pod must be gone before the new one
-  # opens the database. An upgrade is therefore a short outage (documented in
-  # the runbook).
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: c11n
+    app.kubernetes.io/instance: c11n
+    app.kubernetes.io/component: pocketbase
+  ports:
+    - name: pb
+      port: 8090
+      targetPort: pb
+      protocol: TCP
+
+---
+# Source: c11n/templates/service.yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: c11n-pocketbase-headless
+  labels:
+    helm.sh/chart: "c11n-0.1.0"
+    app.kubernetes.io/name: c11n
+    app.kubernetes.io/instance: c11n
+    app.kubernetes.io/version: "0.1.0"
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/component: pocketbase
+spec:
+  # Governs the StatefulSet: pod 0 gets <pod>.<service>.<ns>.svc. No traffic
+  # goes through it (a headless Service resolves to pod IPs and nothing else),
+  # which is why caddy addresses the ClusterIP Service above instead.
+  type: ClusterIP
+  clusterIP: None
+  selector:
+    app.kubernetes.io/name: c11n
+    app.kubernetes.io/instance: c11n
+    app.kubernetes.io/component: pocketbase
+  ports:
+    - name: pb
+      port: 8090
+      targetPort: pb
+      protocol: TCP
+
+---
+# Source: c11n/templates/caddy-deployment.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: c11n-caddy
+  labels:
+    helm.sh/chart: "c11n-0.1.0"
+    app.kubernetes.io/name: c11n
+    app.kubernetes.io/instance: c11n
+    app.kubernetes.io/version: "0.1.0"
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/component: caddy
+spec:
+  # caddy.replicas, default 1. Anything above 1 is safe (the pods share nothing)
+  # and is how a review site survives a node drain without an ingress 503.
+  replicas: 2
+  # RollingUpdate with maxUnavailable 0: a new pod must be Ready before the old
+  # one goes. maxSurge 1 keeps the rollout inside one extra pod, so a
+  # single-replica site still rolls (readiness only needs the ungated sign-in
+  # page, not PocketBase).
   strategy:
-    type: Recreate
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
   selector:
     matchLabels:
       app.kubernetes.io/name: c11n
       app.kubernetes.io/instance: c11n
+      app.kubernetes.io/component: caddy
   template:
     metadata:
       labels:
         app.kubernetes.io/name: c11n
         app.kubernetes.io/instance: c11n
+        app.kubernetes.io/component: caddy
       annotations:
-        checksum/config: e1bab69fe5b3090a927b7db29b2d5cffcdb1474f4decb111a0f18473cddaedd9
+        checksum/config: 31547ef0515cf29e8b1c4aba6c443c962906e27ea08adbb62f6ee95e293eaf65
     spec:
       # Nothing in this pod talks to the Kubernetes API, so it has no token to
       # misuse if a container is compromised.
       automountServiceAccountToken: false
-      # Both images run as 65532 (see their Dockerfiles). Numeric ids because
-      # runAsNonRoot cannot verify a named user; fsGroup makes the PVC
-      # writable for pocketbase without a chown.
+      # Same pod security as before the split. No fsGroup: the pod's volumes are
+      # emptyDirs the kubelet already creates writable for the running uid, and
+      # there is no data volume here to group-own (pocketbase sets fsGroup).
       securityContext:
         runAsNonRoot: true
         runAsUser: 65532
         runAsGroup: 65532
-        fsGroup: 65532
-        fsGroupChangePolicy: OnRootMismatch
         seccompProfile:
           type: RuntimeDefault
       containers:
-        # ---- the proxy --------------------------------------------------
         - name: caddy
           image: "ghcr.io/huffduff/c11n-caddy@sha256:1111111111111111111111111111111111111111111111111111111111111111"
           imagePullPolicy: IfNotPresent
@@ -168,9 +266,11 @@ spec:
               containerPort: 8080
               protocol: TCP
           env:
-            # Same pod network as pocketbase: loopback, no service hop.
+            # A Service hop now, not loopback: PocketBase is its own workload.
+            # <fullname>-pocketbase resolves in this namespace and is the only
+            # source the pocketbase NetworkPolicy lets 8090 through for.
             - name: C11N_PB_ADDR
-              value: "127.0.0.1:8090"
+              value: "c11n-pocketbase:8090"
             - name: C11N_UPSTREAM
               value: "https://staging.example.com"
             - name: C11N_UPSTREAM_TLS
@@ -179,8 +279,10 @@ spec:
             # the image (:8080, /srv/overlay, /srv/signin) because the Caddyfile
             # and the assets ship together.
           # /__c11n/auth/ is the one route with no session gate in front of it
-          # (it is the static sign-in page). /__c11n/overlay.js returns 401
-          # without a session, so it cannot be a probe.
+          # (it is the static sign-in page), so it answers even while PocketBase
+          # is down - which is what stops this Deployment's rollout from
+          # deadlocking on its own gate. /__c11n/overlay.js returns 401 without
+          # a session, so it cannot be a probe.
           readinessProbe:
             httpGet:
               path: /__c11n/auth/
@@ -213,8 +315,80 @@ spec:
               mountPath: /data
             - name: tmp
               mountPath: /tmp
+      # No pb-data volume and no PVC here: the reviewed site's database belongs
+      # to the pocketbase StatefulSet's volumeClaimTemplate. check-chart asserts
+      # that this Deployment never mounts it.
+      volumes:
+        - name: caddy-config
+          emptyDir: {}
+        - name: caddy-data
+          emptyDir: {}
+        - name: tmp
+          emptyDir: {}
 
-        # ---- the database, migrations, hooks and identity ---------------
+---
+# Source: c11n/templates/pocketbase-statefulset.yaml
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: c11n-pocketbase
+  labels:
+    helm.sh/chart: "c11n-0.1.0"
+    app.kubernetes.io/name: c11n
+    app.kubernetes.io/instance: c11n
+    app.kubernetes.io/version: "0.1.0"
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/component: pocketbase
+spec:
+  # HARDCODED, NOT A VALUE - do not expose this as one. PocketBase is SQLite:
+  # a single writer. Two pods on one volume corrupt it; two pods on two volumes
+  # are two different review sites. One reviewed site = one release = one
+  # pocketbase pod (ADR 0005). check-chart asserts that no values file can move
+  # this off 1.
+  replicas: 1
+  # OrderedReady is the StatefulSet default and is spelled out because it is
+  # load-bearing: pod 0 is created, becomes Ready, and only then would pod 1 be
+  # (there is never a pod 1 - see replicas above).
+  podManagementPolicy: OrderedReady
+  # The headless Service that gives the pod its stable DNS name
+  # (<pod>.<service>.<ns>.svc). PocketBase does not need it to serve, but a
+  # StatefulSet requires a governing Service and caddy's Service is not it.
+  serviceName: c11n-pocketbase-headless
+  # Retain / Retain: scaling this (which would be a mistake) and deleting the
+  # StatefulSet (which `helm uninstall` does) both leave pb_data's claim and
+  # volume behind. Deleting the data is then one explicit `kubectl delete pvc`,
+  # never a side effect of an uninstall. See docs/runbook.md sections 4 and 10.
+  persistentVolumeClaimRetentionPolicy:
+    whenDeleted: Retain
+    whenScaled: Retain
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: c11n
+      app.kubernetes.io/instance: c11n
+      app.kubernetes.io/component: pocketbase
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: c11n
+        app.kubernetes.io/instance: c11n
+        app.kubernetes.io/component: pocketbase
+      annotations:
+        checksum/config: 204b1b0cf6e01c630996cf714a97d88aa73e169aa6f1bb654fc2315fc72a78f5
+    spec:
+      # Nothing in this pod talks to the Kubernetes API.
+      automountServiceAccountToken: false
+      # Both images run as 65532 (see their Dockerfiles). Numeric ids because
+      # runAsNonRoot cannot verify a named user; fsGroup makes the volume
+      # writable for pocketbase without a chown.
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+        fsGroupChangePolicy: OnRootMismatch
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
         - name: pocketbase
           image: "ghcr.io/huffduff/c11n-pocketbase@sha256:2222222222222222222222222222222222222222222222222222222222222222"
           imagePullPolicy: IfNotPresent
@@ -267,6 +441,11 @@ spec:
           # /api/health answers as soon as the HTTP server is up. On a FRESH
           # database the pending migrations run at boot first, so the startup
           # probe is generous: it is the migration window, not a hang.
+          #
+          # These probes ARE the owner bootstrap: the first request creates the
+          # owner and prints its link (NOTES.txt, runbook section 2). Caddy's
+          # forward_auth also issues requests, so a restart with a probe that
+          # never fired still bootstraps on the first page view.
           startupProbe:
             httpGet:
               path: /api/health
@@ -297,20 +476,36 @@ spec:
           volumeMounts:
             - name: pb-data
               mountPath: /pb/pb_data
-            # readOnlyRootFilesystem: temp files (zip export during a backup,
-            # uploads in flight) go to /tmp.
+            # readOnlyRootFilesystem: temp files (the zip staged during a
+            # backup, uploads in flight) go to /tmp.
             - name: tmp
               mountPath: /tmp
       volumes:
-        - name: pb-data
-          persistentVolumeClaim:
-            claimName: c11n-pb-data
-        - name: caddy-config
-          emptyDir: {}
-        - name: caddy-data
-          emptyDir: {}
         - name: tmp
           emptyDir: {}
+  # The reviewed site's data. Named (not generated) so the claim is
+  # pb-data-<sts>-0, i.e. c11n-pocketbase-0 -> c11n-pb-data-c11n-pocketbase-0
+  # for a release called c11n. Size and class come from persistence.*, and a
+  # change to SIZE only affects a newly created claim (Kubernetes has no
+  # shrink and StatefulSets do not re-render existing claims): to grow it, edit
+  # the PVC or delete and re-create it from a backup. docs/runbook.md section 5.
+  volumeClaimTemplates:
+    - metadata:
+        name: pb-data
+        labels:
+          helm.sh/chart: "c11n-0.1.0"
+          app.kubernetes.io/name: c11n
+          app.kubernetes.io/instance: c11n
+          app.kubernetes.io/version: "0.1.0"
+          app.kubernetes.io/managed-by: Helm
+          app.kubernetes.io/component: pocketbase
+      spec:
+        accessModes:
+          - ReadWriteOnce
+        storageClassName: "local-path"
+        resources:
+          requests:
+            storage: 5Gi
 
 ---
 # Source: c11n/templates/admin-ingress.yaml
@@ -324,7 +519,6 @@ metadata:
     app.kubernetes.io/instance: c11n
     app.kubernetes.io/version: "0.1.0"
     app.kubernetes.io/managed-by: Helm
-    app.kubernetes.io/component: proxy
   annotations:
     c11n.io/warning: "PocketBase SUPERUSER UI - not the review host. See the chart's adminIngress values."
     cert-manager.io/cluster-issuer: letsencrypt-prod
@@ -338,9 +532,9 @@ spec:
             pathType: Prefix
             backend:
               service:
-                name: c11n
+                name: c11n-pocketbase
                 port:
-                  name: pb-admin
+                  name: pb
   tls:
     - hosts:
         - "admin.review.example.com"
@@ -361,7 +555,6 @@ metadata:
     app.kubernetes.io/instance: c11n
     app.kubernetes.io/version: "0.1.0"
     app.kubernetes.io/managed-by: Helm
-    app.kubernetes.io/component: proxy
   annotations:
     cert-manager.io/cluster-issuer: letsencrypt-prod
 spec:
@@ -377,7 +570,7 @@ spec:
             pathType: Prefix
             backend:
               service:
-                name: c11n
+                name: c11n-caddy
                 port:
                   name: http
   tls:

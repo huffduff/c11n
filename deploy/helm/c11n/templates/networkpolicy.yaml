@@ -1,40 +1,114 @@
 {{- if .Values.networkPolicy.enabled }}
 {{- include "c11n.validate" . }}
+{{- $name := include "c11n.fullname" . }}
+{{- $ns := .Values.networkPolicy.ingressNamespace }}
 {{- /*
-The pod has two listening ports: caddy on 8080 (the review origin, behind the
-Ingress) and pocketbase on 8090. 8090 has no Service unless adminIngress is on,
-but a Service is not required to reach a pod: ANY pod in the cluster can dial
-<podIP>:8090 and talk to the PocketBase API with a stolen or guessed token
-(allowed by the collection rules), so the admin port is cluster-wide by default.
+ON BY DEFAULT (networkPolicy.enabled: true).
 
-This policy closes that: ingress is allowed only on the caddy port, and only
-from the ingress controller's namespace (matched on the namespace label
-Kubernetes adds automatically). Nothing here restricts egress, so DNS and the
-S3 endpoint still work. It is off by default because a wrong selector or a CNI
-that does not enforce policies turns this into an outage.
+Why: before the split, the single pod's 8090 was reachable on the pod IP from
+anywhere in the cluster (no Service needed), so any compromised pod could talk
+to the PocketBase API. After the split there are two workloads and two ports,
+and only one of them is meant to be reachable from outside the release:
+
+  pocketbase:8090  <- caddy pods only (+ the ingress controller when the admin
+                      Ingress is enabled)
+  caddy:8080       <- the ingress controller namespace
+
+What is NOT restricted: egress. Caddy proxies to an arbitrary upstream and
+PocketBase reaches an arbitrary S3 endpoint, so an egress policy here would
+either need a list of every upstream or break the product. The value of an
+ingress-only policy is that PocketBase is not a cluster-wide API.
+
+CAVEATS (both documented in docs/runbook.md §9):
+  * Enforcement is the CNI's job. k3s ships a network-policy controller and
+    enforces this out of the box; a CNI without one (plain flannel, some
+    managed defaults) silently ignores the object and the cluster behaves as
+    before - the policy is then documentation, not a control.
+  * `kubectl port-forward` traffic is SNAT'd by the kubelet and is usually NOT
+    subject to NetworkPolicy, so the port-forwards in NOTES.txt keep working
+    on most CNIs. It is CNI-dependent: if a port-forward hangs with the policy
+    on, add the node subnet to networkPolicy.additionalAllowedCidrs or turn
+    the policy off.
+  * The namespace match is on the kubernetes.io/metadata.name label, which
+    Kubernetes sets automatically on every namespace. k3s runs Traefik in
+    kube-system (the default); ingress-nginx runs in ingress-nginx - a wrong
+    value here is a 504 from the ingress, not a broken pod.
 */}}
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
-  name: {{ include "c11n.fullname" . }}
+  name: {{ $name }}-pocketbase
   labels:
-    {{- include "c11n.labels" . | nindent 4 }}
+    {{- include "c11n.componentLabels" (dict "root" . "component" "pocketbase") | nindent 4 }}
   annotations:
     c11n.io/why: >-
-      Ingress to this pod is limited to the caddy port from the ingress
-      controller namespace; PocketBase's 8090 is otherwise reachable on the pod
-      IP from anywhere in the cluster.
+      Only caddy pods (and the ingress controller, when the admin Ingress is
+      enabled) may reach PocketBase on 8090. PocketBase has no business being
+      reachable from every pod in the cluster.
 spec:
   podSelector:
     matchLabels:
-      {{- include "c11n.selectorLabels" . | nindent 6 }}
+      {{- include "c11n.componentSelector" (dict "root" . "component" "pocketbase") | nindent 6 }}
+  policyTypes:
+    - Ingress
+  ingress:
+    # (a) the proxy. A bare podSelector means "in THIS namespace", which is
+    # what makes this safe: another release's caddy pods carry a different
+    # app.kubernetes.io/instance and never match.
+    - from:
+        - podSelector:
+            matchLabels:
+              {{- include "c11n.componentSelector" (dict "root" . "component" "caddy") | nindent 14 }}
+      ports:
+        - protocol: TCP
+          port: 8090
+    {{- if .Values.adminIngress.enabled }}
+    # The admin Ingress (an explicit opt-in) publishes the superuser UI: it
+    # comes in through the ingress controller, so the controller's namespace
+    # needs 8090 too. Without adminIngress this rule does not exist, so the
+    # controller cannot reach PocketBase on any port.
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ $ns | quote }}
+          {{- with .Values.networkPolicy.ingressPodSelector }}
+          podSelector:
+            matchLabels:
+              {{- toYaml . | nindent 14 }}
+          {{- end }}
+        {{- with .Values.networkPolicy.additionalAllowedCidrs }}
+        {{- range . }}
+        - ipBlock:
+            cidr: {{ . | quote }}
+        {{- end }}
+        {{- end }}
+      ports:
+        - protocol: TCP
+          port: 8090
+    {{- end }}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ $name }}-caddy
+  labels:
+    {{- include "c11n.componentLabels" (dict "root" . "component" "caddy") | nindent 4 }}
+  annotations:
+    c11n.io/why: >-
+      The review origin answers only the ingress controller (plus any CIDR or
+      pod selector the operator adds). Egress is unrestricted on purpose: the
+      proxy has to reach the reviewed upstream and PocketBase.
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "c11n.componentSelector" (dict "root" . "component" "caddy") | nindent 6 }}
   policyTypes:
     - Ingress
   ingress:
     - from:
         - namespaceSelector:
             matchLabels:
-              kubernetes.io/metadata.name: {{ .Values.networkPolicy.ingressNamespace | quote }}
+              kubernetes.io/metadata.name: {{ $ns | quote }}
           {{- with .Values.networkPolicy.ingressPodSelector }}
           podSelector:
             matchLabels:
@@ -49,10 +123,4 @@ spec:
       ports:
         - protocol: TCP
           port: 8080
-        {{- if .Values.adminIngress.enabled }}
-        # The admin Ingress is an explicit opt-in that publishes 8090; it comes
-        # in through the same controller, so the same source is allowed on it.
-        - protocol: TCP
-          port: 8090
-        {{- end }}
 {{- end }}

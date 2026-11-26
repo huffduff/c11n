@@ -27,8 +27,32 @@ helm.sh/chart: {{ printf "%s-%s" .Chart.Name .Chart.Version | replace "+" "_" | 
 {{ include "c11n.selectorLabels" . }}
 app.kubernetes.io/version: {{ .Chart.AppVersion | quote }}
 app.kubernetes.io/managed-by: {{ .Release.Service }}
-app.kubernetes.io/component: proxy
 {{- end -}}
+
+{{/*
+Component-scoped selectors and labels. The two workloads are separate objects
+now, so each one selects its own pods on app.kubernetes.io/component: caddy |
+pocketbase. The NetworkPolicies select on the same label, which is why the
+component label is on the POD template and not only on the workload.
+
+Called with a dict: (dict "root" . "component" "caddy").
+*/}}
+{{- define "c11n.componentSelector" -}}
+{{ include "c11n.selectorLabels" .root }}
+app.kubernetes.io/component: {{ .component }}
+{{- end -}}
+
+{{- define "c11n.componentLabels" -}}
+{{ include "c11n.labels" .root }}
+app.kubernetes.io/component: {{ .component }}
+{{- end -}}
+
+{{/*
+Per-component placement and sizing overrides fall back to the top-level
+defaults with `default`, which treats {} and [] as empty: the templates do
+  {{- with (.Values.caddy.nodeSelector | default .Values.nodeSelector) }}
+so an unset (or empty) component block means "use the top-level value".
+*/}}
 
 {{/*
 The origin invite links are built from. Explicit publicUrl wins. Otherwise the

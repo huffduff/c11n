@@ -1,0 +1,156 @@
+{{- include "c11n.validate" . }}
+{{- $name := include "c11n.fullname" . }}
+{{- /*
+The proxy. STATELESS: it holds the overlay bundle and the sign-in page inside
+the image, its only state is an autosaved config and a temp dir, so it can be
+scaled, rolled and rescheduled freely. PocketBase is a separate StatefulSet
+(ADR 0005, revised 2026-11-26).
+*/}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $name }}-caddy
+  labels:
+    {{- include "c11n.componentLabels" (dict "root" . "component" "caddy") | nindent 4 }}
+spec:
+  # caddy.replicas, default 1. Anything above 1 is safe (the pods share nothing)
+  # and is how a review site survives a node drain without an ingress 503.
+  replicas: {{ .Values.caddy.replicas }}
+  # RollingUpdate with maxUnavailable 0: a new pod must be Ready before the old
+  # one goes. maxSurge 1 keeps the rollout inside one extra pod, so a
+  # single-replica site still rolls (readiness only needs the ungated sign-in
+  # page, not PocketBase).
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
+  selector:
+    matchLabels:
+      {{- include "c11n.componentSelector" (dict "root" . "component" "caddy") | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "c11n.componentSelector" (dict "root" . "component" "caddy") | nindent 8 }}
+      annotations:
+        {{- /*
+        podAnnotations FIRST, checksum/config LAST: set() overwrites, so a user
+        annotation named checksum/config is replaced rather than emitted twice
+        (a duplicate key is rejected by the YAML parser before the object exists).
+
+        The checksum covers ONLY the values caddy consumes. It used to hash the
+        whole .Values, which meant changing owner.email or a backup bucket
+        rolled the proxy for nothing; now a PocketBase-only change restarts
+        PocketBase alone (and vice versa).
+        */}}
+        {{- $config := dict
+              "host" .Values.host
+              "publicUrl" .Values.publicUrl
+              "tlsMode" .Values.tls.mode
+              "cookieSecure" .Values.cookie.secure
+              "upstream" .Values.upstream
+              "image" .Values.caddy.image }}
+        {{- $annotations := deepCopy (.Values.podAnnotations | default dict) }}
+        {{- $_ := set $annotations "checksum/config" ($config | toJson | sha256sum) }}
+        {{- toYaml $annotations | nindent 8 }}
+    spec:
+      # Nothing in this pod talks to the Kubernetes API, so it has no token to
+      # misuse if a container is compromised.
+      automountServiceAccountToken: false
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      # Same pod security as before the split. No fsGroup: the pod's volumes are
+      # emptyDirs the kubelet already creates writable for the running uid, and
+      # there is no data volume here to group-own (pocketbase sets fsGroup).
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      {{- with (.Values.caddy.nodeSelector | default .Values.nodeSelector) }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with (.Values.caddy.affinity | default .Values.affinity) }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with (.Values.caddy.tolerations | default .Values.tolerations) }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: caddy
+          image: {{ include "c11n.caddyImage" . | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+          ports:
+            - name: http
+              containerPort: 8080
+              protocol: TCP
+          env:
+            # A Service hop now, not loopback: PocketBase is its own workload.
+            # <fullname>-pocketbase resolves in this namespace and is the only
+            # source the pocketbase NetworkPolicy lets 8090 through for.
+            - name: C11N_PB_ADDR
+              value: {{ printf "%s-pocketbase:8090" $name | quote }}
+            - name: C11N_UPSTREAM
+              value: {{ .Values.upstream.url | quote }}
+            - name: C11N_UPSTREAM_TLS
+              value: {{ .Values.upstream.tls | quote }}
+            # C11N_LISTEN, C11N_OVERLAY_DIR and C11N_SIGNIN_DIR are baked into
+            # the image (:8080, /srv/overlay, /srv/signin) because the Caddyfile
+            # and the assets ship together.
+          # /__c11n/auth/ is the one route with no session gate in front of it
+          # (it is the static sign-in page), so it answers even while PocketBase
+          # is down - which is what stops this Deployment's rollout from
+          # deadlocking on its own gate. /__c11n/overlay.js returns 401 without
+          # a session, so it cannot be a probe.
+          readinessProbe:
+            httpGet:
+              path: /__c11n/auth/
+              port: http
+            initialDelaySeconds: 2
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+          livenessProbe:
+            httpGet:
+              path: /__c11n/auth/
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 20
+            timeoutSeconds: 5
+            failureThreshold: 3
+          {{- with (.Values.caddy.resources | default .Values.resources.caddy) }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          volumeMounts:
+            # readOnlyRootFilesystem: Caddy still writes its autosave config
+            # and any on-disk state under XDG_CONFIG_HOME/XDG_DATA_HOME
+            # (/config, /data - set in the image), plus temp files in /tmp.
+            - name: caddy-config
+              mountPath: /config
+            - name: caddy-data
+              mountPath: /data
+            - name: tmp
+              mountPath: /tmp
+      # No pb-data volume and no PVC here: the reviewed site's database belongs
+      # to the pocketbase StatefulSet's volumeClaimTemplate. check-chart asserts
+      # that this Deployment never mounts it.
+      volumes:
+        - name: caddy-config
+          emptyDir: {}
+        - name: caddy-data
+          emptyDir: {}
+        - name: tmp
+          emptyDir: {}

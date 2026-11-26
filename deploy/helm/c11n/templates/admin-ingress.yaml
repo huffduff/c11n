@@ -11,6 +11,9 @@
   # The default is adminIngress.enabled=false; prefer the port-forward in    #
   # NOTES.txt.                                                              #
   ###########################################################################
+  # The backend is the pocketbase Service, NOT caddy: this Ingress skips the #
+  # session gate entirely, which is why networkpolicy.yaml opens 8090 to the #
+  # ingress controller only when adminIngress.enabled is true.              #
 */}}
 {{- $annotations := deepCopy (.Values.adminIngress.annotations | default dict) }}
 {{- if eq .Values.tls.mode "certManager" }}
@@ -40,9 +43,9 @@ spec:
             pathType: Prefix
             backend:
               service:
-                name: {{ include "c11n.fullname" . }}
+                name: {{ include "c11n.fullname" . }}-pocketbase
                 port:
-                  name: pb-admin
+                  name: pb
   {{- if ne .Values.tls.mode "none" }}
   tls:
     - hosts:

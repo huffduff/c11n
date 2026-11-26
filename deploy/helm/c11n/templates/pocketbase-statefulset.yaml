@@ -1,48 +1,84 @@
 {{- include "c11n.validate" . }}
+{{- $name := include "c11n.fullname" . }}
+{{- /*
+The database, migrations, hooks and identity. A StatefulSet of exactly ONE pod,
+with its own volumeClaimTemplate: pb_data is SQLite and pocketbase is the only
+process that may open it.
+
+Not a Deployment with a PVC: a StatefulSet is the k8s object that owns "one
+pod, one claim, delete them together on purpose" - the claim name is derived
+(pb-data-<sts>-0) and persistentVolumeClaimRetentionPolicy says what happens to
+it. The single-replica PVC with helm.sh/resource-policy: keep this chart used to
+render is gone: a claim inside a StatefulSet is retained by that policy, not by
+a Helm annotation that only ever protected it from `helm uninstall`.
+*/}}
 apiVersion: apps/v1
-kind: Deployment
+kind: StatefulSet
 metadata:
-  name: {{ include "c11n.fullname" . }}
+  name: {{ $name }}-pocketbase
   labels:
-    {{- include "c11n.labels" . | nindent 4 }}
+    {{- include "c11n.componentLabels" (dict "root" . "component" "pocketbase") | nindent 4 }}
 spec:
-  # HARDCODED, not a value: PocketBase is SQLite, which has a single writer.
-  # Two pods against one PVC corrupt it, and two pods with two PVCs are two
-  # different review sites. One review site = one release = one pod (ADR 0005).
+  # HARDCODED, NOT A VALUE - do not expose this as one. PocketBase is SQLite:
+  # a single writer. Two pods on one volume corrupt it; two pods on two volumes
+  # are two different review sites. One reviewed site = one release = one
+  # pocketbase pod (ADR 0005). check-chart asserts that no values file can move
+  # this off 1.
   replicas: 1
-  # Recreate, never RollingUpdate: the old pod must be gone before the new one
-  # opens the database. An upgrade is therefore a short outage (documented in
-  # the runbook).
-  strategy:
-    type: Recreate
+  # OrderedReady is the StatefulSet default and is spelled out because it is
+  # load-bearing: pod 0 is created, becomes Ready, and only then would pod 1 be
+  # (there is never a pod 1 - see replicas above).
+  podManagementPolicy: OrderedReady
+  # The headless Service that gives the pod its stable DNS name
+  # (<pod>.<service>.<ns>.svc). PocketBase does not need it to serve, but a
+  # StatefulSet requires a governing Service and caddy's Service is not it.
+  serviceName: {{ $name }}-pocketbase-headless
+  # Retain / Retain: scaling this (which would be a mistake) and deleting the
+  # StatefulSet (which `helm uninstall` does) both leave pb_data's claim and
+  # volume behind. Deleting the data is then one explicit `kubectl delete pvc`,
+  # never a side effect of an uninstall. See docs/runbook.md sections 4 and 10.
+  persistentVolumeClaimRetentionPolicy:
+    whenDeleted: Retain
+    whenScaled: Retain
   selector:
     matchLabels:
-      {{- include "c11n.selectorLabels" . | nindent 6 }}
+      {{- include "c11n.componentSelector" (dict "root" . "component" "pocketbase") | nindent 6 }}
   template:
     metadata:
       labels:
-        {{- include "c11n.selectorLabels" . | nindent 8 }}
+        {{- include "c11n.componentSelector" (dict "root" . "component" "pocketbase") | nindent 8 }}
       annotations:
         {{- /*
-        podAnnotations FIRST, checksum/config LAST: set() overwrites, so a user
-        annotation named checksum/config is replaced rather than emitted twice
-        (a duplicate key is rejected by the YAML parser before the object exists).
-        Restart the pod when the configuration changes: a changed upstream, host
-        or TTL must take effect on upgrade, and env is only read at process start.
+        podAnnotations FIRST, checksum/config LAST (set() overwrites, so a user
+        annotation of that name is replaced, not duplicated).
+
+        This checksum covers the values PocketBase reads: identity, sessions,
+        invites, the cookie flag, the public origin, backups, SMTP and the
+        image. It deliberately does NOT include caddy's values or
+        persistence.size, so changing either does not restart the database.
         */}}
+        {{- $config := dict
+              "host" .Values.host
+              "publicUrl" .Values.publicUrl
+              "owner" .Values.owner
+              "session" .Values.session
+              "invite" .Values.invite
+              "cookie" .Values.cookie
+              "backup" .Values.backup
+              "smtp" .Values.smtp
+              "image" .Values.pocketbase.image }}
         {{- $annotations := deepCopy (.Values.podAnnotations | default dict) }}
-        {{- $_ := set $annotations "checksum/config" (.Values | toJson | sha256sum) }}
+        {{- $_ := set $annotations "checksum/config" ($config | toJson | sha256sum) }}
         {{- toYaml $annotations | nindent 8 }}
     spec:
-      # Nothing in this pod talks to the Kubernetes API, so it has no token to
-      # misuse if a container is compromised.
+      # Nothing in this pod talks to the Kubernetes API.
       automountServiceAccountToken: false
       {{- with .Values.imagePullSecrets }}
       imagePullSecrets:
         {{- toYaml . | nindent 8 }}
       {{- end }}
       # Both images run as 65532 (see their Dockerfiles). Numeric ids because
-      # runAsNonRoot cannot verify a named user; fsGroup makes the PVC
+      # runAsNonRoot cannot verify a named user; fsGroup makes the volume
       # writable for pocketbase without a chown.
       securityContext:
         runAsNonRoot: true
@@ -52,77 +88,19 @@ spec:
         fsGroupChangePolicy: OnRootMismatch
         seccompProfile:
           type: RuntimeDefault
-      {{- with .Values.nodeSelector }}
+      {{- with (.Values.pocketbase.nodeSelector | default .Values.nodeSelector) }}
       nodeSelector:
         {{- toYaml . | nindent 8 }}
       {{- end }}
-      {{- with .Values.affinity }}
+      {{- with (.Values.pocketbase.affinity | default .Values.affinity) }}
       affinity:
         {{- toYaml . | nindent 8 }}
       {{- end }}
-      {{- with .Values.tolerations }}
+      {{- with (.Values.pocketbase.tolerations | default .Values.tolerations) }}
       tolerations:
         {{- toYaml . | nindent 8 }}
       {{- end }}
       containers:
-        # ---- the proxy --------------------------------------------------
-        - name: caddy
-          image: {{ include "c11n.caddyImage" . | quote }}
-          imagePullPolicy: {{ .Values.image.pullPolicy }}
-          securityContext:
-            allowPrivilegeEscalation: false
-            readOnlyRootFilesystem: true
-            capabilities:
-              drop:
-                - ALL
-          ports:
-            - name: http
-              containerPort: 8080
-              protocol: TCP
-          env:
-            # Same pod network as pocketbase: loopback, no service hop.
-            - name: C11N_PB_ADDR
-              value: "127.0.0.1:8090"
-            - name: C11N_UPSTREAM
-              value: {{ .Values.upstream.url | quote }}
-            - name: C11N_UPSTREAM_TLS
-              value: {{ .Values.upstream.tls | quote }}
-            # C11N_LISTEN, C11N_OVERLAY_DIR and C11N_SIGNIN_DIR are baked into
-            # the image (:8080, /srv/overlay, /srv/signin) because the Caddyfile
-            # and the assets ship together.
-          # /__c11n/auth/ is the one route with no session gate in front of it
-          # (it is the static sign-in page). /__c11n/overlay.js returns 401
-          # without a session, so it cannot be a probe.
-          readinessProbe:
-            httpGet:
-              path: /__c11n/auth/
-              port: http
-            initialDelaySeconds: 2
-            periodSeconds: 10
-            timeoutSeconds: 3
-            failureThreshold: 3
-          livenessProbe:
-            httpGet:
-              path: /__c11n/auth/
-              port: http
-            initialDelaySeconds: 10
-            periodSeconds: 20
-            timeoutSeconds: 5
-            failureThreshold: 3
-          resources:
-            {{- toYaml .Values.resources.caddy | nindent 12 }}
-          volumeMounts:
-            # readOnlyRootFilesystem: Caddy still writes its autosave config
-            # and any on-disk state under XDG_CONFIG_HOME/XDG_DATA_HOME
-            # (/config, /data - set in the image), plus temp files in /tmp.
-            - name: caddy-config
-              mountPath: /config
-            - name: caddy-data
-              mountPath: /data
-            - name: tmp
-              mountPath: /tmp
-
-        # ---- the database, migrations, hooks and identity ---------------
         - name: pocketbase
           image: {{ include "c11n.pocketbaseImage" . | quote }}
           imagePullPolicy: {{ .Values.image.pullPolicy }}
@@ -179,12 +157,12 @@ spec:
             - name: C11N_BACKUP_S3_ACCESS_KEY
               valueFrom:
                 secretKeyRef:
-                  name: {{ include "c11n.fullname" . }}-secrets
+                  name: {{ $name }}-secrets
                   key: backup-s3-access-key
             - name: C11N_BACKUP_S3_SECRET
               valueFrom:
                 secretKeyRef:
-                  name: {{ include "c11n.fullname" . }}-secrets
+                  name: {{ $name }}-secrets
                   key: backup-s3-secret-key
             {{- end }}
             # ---- SMTP (POST-MVP, INERT) ----
@@ -211,7 +189,7 @@ spec:
             - name: C11N_SMTP_PASSWORD
               valueFrom:
                 secretKeyRef:
-                  name: {{ include "c11n.fullname" . }}-secrets
+                  name: {{ $name }}-secrets
                   key: smtp-password
             {{- end }}
             {{- end }}
@@ -220,6 +198,11 @@ spec:
           # /api/health answers as soon as the HTTP server is up. On a FRESH
           # database the pending migrations run at boot first, so the startup
           # probe is generous: it is the migration window, not a hang.
+          #
+          # These probes ARE the owner bootstrap: the first request creates the
+          # owner and prints its link (NOTES.txt, runbook section 2). Caddy's
+          # forward_auth also issues requests, so a restart with a probe that
+          # never fired still bootstraps on the first page view.
           startupProbe:
             httpGet:
               path: /api/health
@@ -241,22 +224,37 @@ spec:
             periodSeconds: 20
             timeoutSeconds: 5
             failureThreshold: 3
+          {{- with (.Values.pocketbase.resources | default .Values.resources.pocketbase) }}
           resources:
-            {{- toYaml .Values.resources.pocketbase | nindent 12 }}
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
           volumeMounts:
             - name: pb-data
               mountPath: /pb/pb_data
-            # readOnlyRootFilesystem: temp files (zip export during a backup,
-            # uploads in flight) go to /tmp.
+            # readOnlyRootFilesystem: temp files (the zip staged during a
+            # backup, uploads in flight) go to /tmp.
             - name: tmp
               mountPath: /tmp
       volumes:
-        - name: pb-data
-          persistentVolumeClaim:
-            claimName: {{ include "c11n.fullname" . }}-pb-data
-        - name: caddy-config
-          emptyDir: {}
-        - name: caddy-data
-          emptyDir: {}
         - name: tmp
           emptyDir: {}
+  # The reviewed site's data. Named (not generated) so the claim is
+  # pb-data-<sts>-0, i.e. c11n-pocketbase-0 -> c11n-pb-data-c11n-pocketbase-0
+  # for a release called c11n. Size and class come from persistence.*, and a
+  # change to SIZE only affects a newly created claim (Kubernetes has no
+  # shrink and StatefulSets do not re-render existing claims): to grow it, edit
+  # the PVC or delete and re-create it from a backup. docs/runbook.md section 5.
+  volumeClaimTemplates:
+    - metadata:
+        name: pb-data
+        labels:
+          {{- include "c11n.componentLabels" (dict "root" . "component" "pocketbase") | nindent 10 }}
+      spec:
+        accessModes:
+          - ReadWriteOnce
+        {{- with .Values.persistence.storageClass }}
+        storageClassName: {{ . | quote }}
+        {{- end }}
+        resources:
+          requests:
+            storage: {{ .Values.persistence.size }}

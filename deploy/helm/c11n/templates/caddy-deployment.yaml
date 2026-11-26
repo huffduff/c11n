@@ -92,6 +92,18 @@ spec:
             capabilities:
               drop:
                 - ALL
+          # The entrypoint is named, not inherited. Kubernetes replaces the
+          # image CMD with `args`, so the binary has to be a `command`: args
+          # alone would make the kubelet exec `run`. Absolute path on purpose;
+          # nothing here depends on the image's PATH or WORKDIR.
+          command:
+            - /usr/bin/caddy
+          args:
+            - run
+            - --config
+            - /etc/caddy/Caddyfile
+            - --adapter
+            - caddyfile
           ports:
             - name: http
               containerPort: 8080

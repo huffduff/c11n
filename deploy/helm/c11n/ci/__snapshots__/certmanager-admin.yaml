@@ -261,6 +261,18 @@ spec:
             capabilities:
               drop:
                 - ALL
+          # The entrypoint is named, not inherited. Kubernetes replaces the
+          # image CMD with `args`, so the binary has to be a `command`: args
+          # alone would make the kubelet exec `run`. Absolute path on purpose;
+          # nothing here depends on the image's PATH or WORKDIR.
+          command:
+            - /usr/bin/caddy
+          args:
+            - run
+            - --config
+            - /etc/caddy/Caddyfile
+            - --adapter
+            - caddyfile
           ports:
             - name: http
               containerPort: 8080
@@ -398,9 +410,15 @@ spec:
             capabilities:
               drop:
                 - ALL
-          # Spelled out rather than inherited from the image CMD: the chart
-          # says exactly which dirs it expects, and a base image whose CMD
-          # drifts cannot silently change where the data lives.
+          # Explicit command AND args, never args alone: Kubernetes REPLACES
+          # the image CMD with `args`, so args without a command leave the
+          # kubelet exec'ing the first arg ("exec: \"serve\": executable file
+          # not found in $PATH", found on k3s). The absolute path also makes the
+          # pod independent of the image's ENTRYPOINT, PATH and WORKDIR, and the
+          # dirs are spelled out so a base image whose CMD drifts cannot move
+          # where the data lives.
+          command:
+            - /pb/pocketbase
           args:
             - serve
             - --http=0.0.0.0:8090

@@ -109,6 +109,22 @@ function codeLines(text) {
   check(/^USER 65532:65532$/m.test(dockerfile), 'caddy image runs as uid 65532')
   check(/^EXPOSE 8080$/m.test(dockerfile), 'caddy image listens on 8080 (not a privileged port)')
 
+  // The official caddy image ships /usr/bin/caddy with a FILE CAPABILITY
+  // (`setcap cap_net_bind_service=+ep`). A pod with capabilities.drop=[ALL]
+  // and allowPrivilegeEscalation=false cannot exec such a binary: execve(2)
+  // returns EPERM and the container dies with
+  // "exec /usr/bin/caddy: operation not permitted" (seen on k3s). The final
+  // stage must strip the cap AND assert the result at build time, so a base
+  // image change fails the build rather than crash-looping a pod.
+  check(
+    codeLines(dockerfile).includes('setcap -r /usr/bin/caddy'),
+    'caddy image strips the file capability from /usr/bin/caddy',
+  )
+  check(
+    /getcap \/usr\/bin\/caddy/.test(codeLines(dockerfile)),
+    'caddy image asserts /usr/bin/caddy carries no file capabilities at build time',
+  )
+
   // The build context is the repo root, so .dockerignore decides what the
   // COPYs can see. Excluding any of them turns into a broken `docker build`.
   const dockerignore = read('.dockerignore')
@@ -163,6 +179,25 @@ function codeLines(text) {
   check(!/apk add[^\n]*unzip/.test(runtimeStage), 'unzip is not installed in the runtime stage')
   check(dockerfile.includes('--dir=/pb/pb_data'), 'pocketbase stores data at /pb/pb_data')
   check(/^EXPOSE 8090$/m.test(dockerfile), 'pocketbase exposes 8090')
+
+  // Kubernetes REPLACES the image CMD with a container's `args` and keeps the
+  // ENTRYPOINT. With only CMD ["/pb/pocketbase", "serve", …], the chart's
+  // `args: [serve, …]` made the kubelet exec `serve` and the pod died with
+  // `exec: "serve": executable file not found in $PATH` on k3s. The binary
+  // must be the ENTRYPOINT, with the default arguments in CMD so `docker run`
+  // and docker-compose.yml (which set no command) still work.
+  check(
+    /^ENTRYPOINT \["\/pb\/pocketbase"\]$/m.test(dockerfile),
+    'pocketbase image has ENTRYPOINT /pb/pocketbase (so k8s args are arguments, not the program)',
+  )
+  check(
+    /^CMD \["serve",/m.test(dockerfile),
+    'pocketbase CMD is the default `serve` argument list (no binary in it)',
+  )
+  check(
+    !/^CMD \["\/pb\/pocketbase"/m.test(dockerfile),
+    'pocketbase CMD does not name the binary (that is the ENTRYPOINT)',
+  )
 }
 
 // ---- scripts/tools.env -----------------------------------------------------

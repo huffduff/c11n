@@ -60,6 +60,25 @@ RUN xcaddy build ${CADDY_GO_VERSION} \
 FROM caddy:${CADDY_VERSION}
 COPY --from=builder /usr/bin/caddy /usr/bin/caddy
 
+# The official caddy image sets a FILE CAPABILITY on /usr/bin/caddy
+# (`setcap cap_net_bind_service=+ep`, to bind 80/443 as a non-root user). Our
+# pods run with `capabilities.drop: [ALL]` and
+# `allowPrivilegeEscalation: false` (no_new_privs), and execve(2) refuses a
+# binary whose file capability is not in the bounding set: the container died
+# with `exec /usr/bin/caddy: operation not permitted` on the k3s cluster.
+#
+# Stripping it in the builder would not be enough: COPY --from overwrites an
+# existing path in place, and overlayfs copy-up keeps the xattr, so the cap
+# survives the copy. Strip it here, in the FINAL stage, so the guarantee is
+# about the file we actually ship rather than about layer mechanics - and
+# assert it, so a future base image that stops shipping libcap (or starts
+# dropping caps back in) fails the BUILD instead of crash-looping a pod.
+# `getcap` prints nothing for a file with no capabilities; the base image
+# installs libcap for its own setcap, so this adds no package. Caddy listens on
+# 8080 (C11N_LISTEN, EXPOSE below), so it needs no capability at all.
+RUN setcap -r /usr/bin/caddy; \
+    test -z "$(getcap /usr/bin/caddy)"
+
 # The overlay bundle is served at /__c11n/* and the sign-in page at
 # /__c11n/auth/*; the defaults in deploy/Caddyfile point here, so the chart
 # needs no env override for either path.

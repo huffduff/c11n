@@ -268,6 +268,55 @@ function metadataName(doc) {
   return doc.match(/^metadata:\n(?:.*\n)*?\s{2}name:\s*(\S+)$/m)?.[1] ?? ''
 }
 
+/**
+ * The containers of a workload, one text block each. Line-based on purpose:
+ * the block ends at the first line less indented than the `containers:` key's
+ * children, so `volumes:`/`volumeClaimTemplates:` are not swallowed.
+ */
+function containerBlocks(doc) {
+  const lines = doc.split('\n')
+  const blocks = []
+  let childIndent = -1
+  let current = null
+  for (const line of lines) {
+    const header = line.match(/^(\s*)containers:\s*$/)
+    if (header) {
+      childIndent = header[1].length + 2
+      current = null
+      continue
+    }
+    if (childIndent < 0) continue
+    if (line.trim() === '') {
+      if (current) current.push(line)
+      continue
+    }
+    const indent = line.length - line.trimStart().length
+    if (indent < childIndent) {
+      childIndent = -1
+      current = null
+      continue
+    }
+    if (indent === childIndent && /^-\s+name:/.test(line.trimStart())) {
+      current = [line]
+      blocks.push(current)
+      continue
+    }
+    if (current) current.push(line)
+  }
+  return blocks.map((block) => block.join('\n'))
+}
+
+function containerName(block) {
+  return block.match(/^\s*-\s+name:\s*(\S+)$/m)?.[1] ?? ''
+}
+
+/** A YAML block list's items as plain strings, or null when the key is absent. */
+function yamlList(block, key) {
+  const match = block.match(new RegExp(`^\\s+${key}:\\n((?:\\s+- .*\\n?)+)`, 'm'))
+  if (!match) return null
+  return [...match[1].matchAll(/^\s+- (.*)$/gm)].map((m) => m[1].trim().replace(/^["']|["']$/g, ''))
+}
+
 const renders = new Map()
 for (const file of valueFiles) {
   const label = path.relative(repoRoot, path.join(ciDir, file))
@@ -334,6 +383,36 @@ for (const [label, text] of renders) {
   check(
     workloads.length > 0 && workloads.every((doc) => /^\s{6}automountServiceAccountToken:\s*false$/m.test(doc)),
     `${label}: automountServiceAccountToken is false on every workload`,
+  )
+
+  // ---- explicit container commands ----------------------------------------
+  // Kubernetes REPLACES the image CMD with `args` and keeps the ENTRYPOINT.
+  // An image whose only instruction is CMD ["/pb/pocketbase", "serve", ...]
+  // therefore ran `serve` as the program and died with
+  // `exec: "serve": executable file not found in $PATH` on k3s. Every
+  // container in a rendered workload must name its own entrypoint, by absolute
+  // path, so the pod does not depend on the image's ENTRYPOINT, PATH or
+  // WORKDIR - and so `args` is never the only thing naming a program.
+  const containers = workloads.flatMap(containerBlocks)
+  const noCommand = containers.filter((c) => {
+    const command = yamlList(c, 'command')
+    return command === null || command.length === 0 || !command[0].startsWith('/')
+  })
+  check(
+    containers.length > 0 && noCommand.length === 0,
+    `${label}: every container has an explicit command whose first element is an absolute path (${containers.length})`,
+    noCommand.map((c) => containerName(c) || '<unnamed>').join(', '),
+  )
+  const argv = new Map(containers.map((c) => [containerName(c), { command: yamlList(c, 'command'), args: yamlList(c, 'args') }]))
+  check(
+    argv.get('caddy')?.command?.[0] === '/usr/bin/caddy' && argv.get('caddy')?.args?.[0] === 'run',
+    `${label}: caddy runs "caddy run --config … --adapter caddyfile" via an explicit command`,
+    JSON.stringify(argv.get('caddy')),
+  )
+  check(
+    argv.get('pocketbase')?.command?.[0] === '/pb/pocketbase' && argv.get('pocketbase')?.args?.[0] === 'serve',
+    `${label}: pocketbase runs "/pb/pocketbase serve …" via an explicit command`,
+    JSON.stringify(argv.get('pocketbase')),
   )
 
   check(

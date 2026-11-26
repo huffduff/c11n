@@ -76,4 +76,13 @@ COPY --chown=65532:65532 pb_hooks /pb/pb_hooks
 ENV TZ=UTC
 USER 65532:65532
 EXPOSE 8090
-CMD ["/pb/pocketbase", "serve", "--http=0.0.0.0:8090", "--dir=/pb/pb_data", "--migrationsDir=/pb/pb_migrations", "--hooksDir=/pb/pb_hooks"]
+# The binary is the ENTRYPOINT and the default arguments are the CMD. The split
+# is load-bearing in Kubernetes: a container's `args` REPLACE the image CMD and
+# leave the ENTRYPOINT alone, while a single CMD naming the binary means
+# `args: [serve, ...]` makes the kubelet exec `serve` itself - which is exactly
+# the `exec: "serve": executable file not found in $PATH` crash-loop the chart
+# hit on k3s. With ENTRYPOINT set, the chart can pass args (or nothing) and
+# `docker run` / deploy/docker-compose.yml, which set no command, still get the
+# full default.
+ENTRYPOINT ["/pb/pocketbase"]
+CMD ["serve", "--http=0.0.0.0:8090", "--dir=/pb/pb_data", "--migrationsDir=/pb/pb_migrations", "--hooksDir=/pb/pb_hooks"]

@@ -1,0 +1,44 @@
+# Build context for BOTH images (the caddy image is built from the repo root:
+# docker build -f deploy/caddy/Dockerfile .). Everything not needed by a
+# Dockerfile's COPY is excluded, so an edit to a test or a log never
+# invalidates a layer.
+#
+# Never exclude package.json / package-lock.json / packages/overlay: the caddy
+# build stage needs them. Never exclude deploy/Caddyfile or packages/signin.
+
+# Dependencies and installs (rebuilt inside the image)
+node_modules
+**/node_modules
+.npm
+.cache
+
+# Pinned native binaries and local stack state
+.tools
+.stack
+
+# Test output
+e2e/test-results
+e2e/playwright-report
+e2e/blob-report
+**/*.log
+
+# Build artifacts, rebuilt in the image
+dist
+build
+**/dist
+**/build
+
+# VCS and editor noise
+.git
+.gitignore
+.github
+.vscode
+.idea
+*.swp
+*.swo
+.DS_Store
+
+# Secrets and local env
+.env
+.env.*
+!.env.example

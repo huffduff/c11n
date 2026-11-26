@@ -8,6 +8,10 @@
 # POCKETBASE_VERSION, and the amd64 one is the same value
 # scripts/fetch-tools.sh verifies the e2e binary against, so the tests run the
 # binary we ship (scripts/check-pins.mjs fails on drift).
+#
+# Runs as uid/gid 65532 (numeric: Kubernetes runAsNonRoot cannot verify a named
+# user). /pb/pb_data is created and owned by that uid, so a fresh emptyDir is
+# writable; the chart additionally sets fsGroup 65532 for the PVC.
 ARG PB_VERSION=0.39.11
 
 FROM alpine:3.20.10
@@ -28,7 +32,7 @@ SHELL ["/bin/ash", "-eo", "pipefail", "-c"]
 # the alpine patch tag above; pinning every apk version per architecture would
 # rot faster than it protects anything here.
 # hadolint ignore=DL3018
-RUN apk add --no-cache ca-certificates unzip \
+RUN apk add --no-cache ca-certificates unzip tzdata \
  && case "${TARGETARCH}" in \
       amd64) sha="${PB_SHA256_AMD64}" ;; \
       arm64) sha="${PB_SHA256_ARM64}" ;; \
@@ -37,8 +41,16 @@ RUN apk add --no-cache ca-certificates unzip \
  && wget -q -O /tmp/pb.zip \
       "https://github.com/pocketbase/pocketbase/releases/download/v${PB_VERSION}/pocketbase_${PB_VERSION}_linux_${TARGETARCH}.zip" \
  && echo "${sha}  /tmp/pb.zip" | sha256sum -c - \
- && unzip /tmp/pb.zip -d /pb/ && rm /tmp/pb.zip
+ && unzip /tmp/pb.zip -d /pb/ \
+ && rm /tmp/pb.zip \
+ && addgroup -g 65532 -S nonroot \
+ && adduser -u 65532 -S -G nonroot -H -s /sbin/nologin nonroot \
+ && mkdir -p /pb/pb_data \
+ && chown -R 65532:65532 /pb
+
 COPY pb_migrations /pb/pb_migrations
 COPY pb_hooks /pb/pb_hooks
+ENV TZ=UTC
+USER 65532:65532
 EXPOSE 8090
 CMD ["/pb/pocketbase", "serve", "--http=0.0.0.0:8090", "--dir=/pb/pb_data", "--migrationsDir=/pb/pb_migrations", "--hooksDir=/pb/pb_hooks"]

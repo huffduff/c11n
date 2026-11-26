@@ -167,14 +167,28 @@ jobs:
             .stack/*.log
           if-no-files-found: ignore
 
+  # The images compile from a repo-root context (the caddy image builds the
+  # overlay workspace). No container is run, so a green job still only means
+  # "the images build".
   docker:
     runs-on: blacksmith-2vcpu-ubuntu-2404
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v7
 
+      - uses: actions/setup-node@v7
+        with:
+          node-version-file: .tool-versions
+          cache: npm
+
+      # No daemon on the dev boxes, so the caddy build stage's COPY set is
+      # proven natively: it copies exactly what the Dockerfile COPYs and runs
+      # the same npm ci + build. Catches a missing COPY or .dockerignore entry.
+      - name: Simulate the caddy build stage
+        run: scripts/check-image-context.sh
+
       - name: Smoke-build caddy image
-        run: docker build -t c11n-caddy:ci deploy/caddy
+        run: docker build -f deploy/caddy/Dockerfile -t c11n-caddy:ci .
 
       - name: Smoke-build pocketbase image
         run: docker build -t c11n-pb:ci deploy/pocketbase

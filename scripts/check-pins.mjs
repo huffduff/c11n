@@ -93,6 +93,32 @@ function codeLines(text) {
   // The builder must not resolve a moving tag.
   check(!/FROM caddy:2-builder/.test(dockerfile), 'caddy builder does not use the moving 2-builder tag')
   check(!/FROM caddy:2\b/.test(dockerfile), 'caddy runtime does not use the moving 2 tag')
+
+  // The overlay build stage pins node to .tool-versions, so the bundle in the
+  // image is built by the same node the repo and CI use.
+  const nodePin = read('.tool-versions').match(/^nodejs (\S+)$/m)?.[1] ?? ''
+  check(/^\d+\.\d+\.\d+$/.test(nodePin), `.tool-versions pins an exact nodejs version (got '${nodePin}')`)
+  check(new RegExp(`^ARG NODE_VERSION=${nodePin.replace(/\./g, '\\.')}$`, 'm').test(dockerfile), `caddy Dockerfile pins ARG NODE_VERSION=${nodePin}`)
+  check(dockerfile.includes('FROM node:${NODE_VERSION}-alpine AS overlay'), 'caddy overlay stage takes ${NODE_VERSION}')
+  check(!/FROM node:\d/.test(dockerfile), 'caddy overlay stage does not hardcode a node tag')
+
+  // Everything the runtime stage must carry, and the non-root contract.
+  check(dockerfile.includes('COPY --from=overlay /src/packages/overlay/dist /srv/overlay'), 'caddy image bakes the overlay bundle')
+  check(dockerfile.includes('COPY packages/signin /srv/signin'), 'caddy image bakes the sign-in page')
+  check(dockerfile.includes('COPY deploy/Caddyfile /etc/caddy/Caddyfile'), 'caddy image bakes the Caddyfile')
+  check(/^USER 65532:65532$/m.test(dockerfile), 'caddy image runs as uid 65532')
+  check(/^EXPOSE 8080$/m.test(dockerfile), 'caddy image listens on 8080 (not a privileged port)')
+
+  // The build context is the repo root, so .dockerignore decides what the
+  // COPYs can see. Excluding any of them turns into a broken `docker build`.
+  const dockerignore = read('.dockerignore')
+  for (const keep of ['packages/overlay', 'packages/signin', 'deploy', 'package.json', 'package-lock.json']) {
+    const excluded = dockerignore
+      .split('\n')
+      .map((line) => line.trim())
+      .some((line) => line !== '' && !line.startsWith('#') && !line.startsWith('!') && (line === keep || line === `/${keep}`))
+    check(!excluded, `.dockerignore does not exclude ${keep}`)
+  }
 }
 
 // ---- deploy/pocketbase/Dockerfile -----------------------------------------
@@ -112,6 +138,12 @@ function codeLines(text) {
   check(codeLines(dockerfile).includes('sha256sum -c'), 'pocketbase verifies the download against the checksum (not just in a comment)')
   // alpine must be a patch tag: `3.20` is re-pointed on every patch release.
   check(/^FROM alpine:\d+\.\d+\.\d+$/m.test(dockerfile), 'pocketbase base image is a patch tag')
+  // Non-root contract: numeric uid, a pre-created data dir, and the volume
+  // path the chart mounts.
+  check(/^USER 65532:65532$/m.test(dockerfile), 'pocketbase image runs as uid 65532')
+  check(codeLines(dockerfile).includes('chown -R 65532:65532 /pb'), 'pocketbase owns /pb (including pb_data)')
+  check(dockerfile.includes('--dir=/pb/pb_data'), 'pocketbase stores data at /pb/pb_data')
+  check(/^EXPOSE 8090$/m.test(dockerfile), 'pocketbase exposes 8090')
 }
 
 // ---- scripts/tools.env -----------------------------------------------------

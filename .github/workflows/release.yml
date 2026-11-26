@@ -1,0 +1,101 @@
+# Release images on a tag.
+#
+# A `v*` tag builds BOTH images for linux/amd64 and linux/arm64 and pushes
+# them to GHCR under one shared version, so a c11n release is exactly the pair
+# of images the tag names:
+#
+#   ghcr.io/huffduff/c11n-caddy:1.2.3      ghcr.io/huffduff/c11n-pocketbase:1.2.3
+#   ghcr.io/huffduff/c11n-caddy:sha-1a2b3c4  …:sha-1a2b3c4
+#
+# The tag version is the git tag without its leading `v`. The chart defaults to
+# the same repositories with `appVersion` as the tag, so `helm install` needs no
+# image values for a release build.
+#
+# arm64 matters: the closedcloud test cluster is t4g.medium (arm64), and the
+# dogfood host may be either. Both images are natively multi-arch (the
+# pocketbase Dockerfile picks its release zip and checksum by TARGETARCH; the
+# caddy one builds the overlay on the build platform and the Go binary per
+# target), so this is a real two-arch build, not an amd64 image under an arm64
+# tag.
+#
+# Least privilege: `contents: read` to check out, `packages: write` to push.
+# Nothing else is needed, and no long-lived registry secret: GITHUB_TOKEN is
+# enough for GHCR in the same org.
+
+name: release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  # Never cancel a release halfway: a half-pushed multi-arch manifest is worse
+  # than a slow one.
+  cancel-in-progress: false
+
+jobs:
+  images:
+    name: ${{ matrix.image }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      # One image failing must not cancel the other: knowing which half of the
+      # release broke is the point of the matrix.
+      fail-fast: false
+      matrix:
+        include:
+          - image: c11n-caddy
+            context: .
+            dockerfile: deploy/caddy/Dockerfile
+          - image: c11n-pocketbase
+            context: deploy/pocketbase
+            dockerfile: deploy/pocketbase/Dockerfile
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Resolve the release version
+        id: version
+        # `v1.2.3` -> `1.2.3`. A tag that is not v<semver-ish> still releases,
+        # but the version tag is the tag as pushed minus the `v`.
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          short="$(git rev-parse --short=7 HEAD)"
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+          echo "short=${short}" >> "$GITHUB_OUTPUT"
+          echo "building ${GITHUB_REF_NAME} as version=${version} sha-${short}"
+
+      - uses: docker/setup-qemu-action@v4
+
+      - uses: docker/setup-buildx-action@v4
+
+      - uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: docker/build-push-action@v7
+        with:
+          context: ${{ matrix.context }}
+          file: ${{ matrix.dockerfile }}
+          platforms: linux/amd64,linux/arm64
+          # Push only: no `load`, which a multi-arch build cannot do anyway.
+          push: true
+          tags: |
+            ghcr.io/huffduff/${{ matrix.image }}:${{ steps.version.outputs.version }}
+            ghcr.io/huffduff/${{ matrix.image }}:sha-${{ steps.version.outputs.short }}
+          # The Dockerfiles' ARG defaults are the pins (scripts/check-pins.mjs
+          # enforces them), so no build args are passed here on purpose: a
+          # release must not be able to drift from what CI tested.
+          provenance: true
+          sbom: true
+          cache-from: type=gha,scope=${{ matrix.image }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.image }}

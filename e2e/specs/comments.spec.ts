@@ -235,7 +235,10 @@ test.describe('SPA navigation', () => {
 
 test.describe('reply and resolve', () => {
   test('a reply reaches both users, resolve clears the pin', async ({ browser }) => {
-    const alice = await createUser(undefined, 'Alice')
+    // Alice is team: resolving a thread she did not author is hers to do,
+    // which is the ADR 0008 cell this test happens to exercise (a client may
+    // only resolve its own — see permissions-matrix.spec.ts).
+    const alice = await createUser(undefined, 'Alice', 'team')
     const bob = await createUser(undefined, 'Bob')
     const seeded = await seedComment({
       author: bob.id,

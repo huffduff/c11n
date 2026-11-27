@@ -1,0 +1,22 @@
+# Chart verification values: k3s default ingress (Traefik) + cert-manager.
+#
+# The common production shape: a real hostname, cluster-issued TLS, the
+# cluster's own default storage class.
+host: review.example.com
+
+upstream:
+  url: https://staging.example.com
+
+owner:
+  email: owner@example.com
+
+ingress:
+  className: traefik
+
+tls:
+  mode: certManager
+  issuer: letsencrypt-prod
+
+persistence:
+  storageClass: local-path
+  size: 5Gi

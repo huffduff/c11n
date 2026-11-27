@@ -4,6 +4,7 @@
 // (picker listeners) lives in App.vue watching comments.mode.
 import { useCommentsStore } from '../stores/comments'
 import { useSessionStore } from '../stores/session'
+import { canComment } from '../lib/permissions'
 
 const session = useSessionStore()
 const comments = useCommentsStore()
@@ -18,6 +19,7 @@ function toggleMode() {
   <div class="c11n-toolbar">
     <span class="c11n-logo">c11n</span>
     <button
+      v-if="canComment(session.me?.role)"
       class="c11n-mode-toggle"
       :class="{ 'c11n-mode-on': comments.mode === 'pick' }"
       type="button"

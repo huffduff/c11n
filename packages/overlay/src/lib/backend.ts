@@ -11,15 +11,16 @@ let impl: C11nBackend = createPocketBaseBackend()
  * `setBackend` without touching module caches.
  */
 export const backend: C11nBackend = {
-  login: (email, password) => impl.login(email, password),
-  logout: () => impl.logout(),
   me: () => impl.me(),
+  logout: () => impl.logout(),
+  invite: (email, role) => impl.invite(email, role),
   // Arity-preserving: an omitted path must reach the impl as an omitted
   // argument (project-wide sidebar query), not an explicit undefined.
   listComments: (project, path) =>
     path === undefined ? impl.listComments(project) : impl.listComments(project, path),
   createComment: (input) => impl.createComment(input),
   setResolved: (id, resolved) => impl.setResolved(id, resolved),
+  deleteComment: (id) => impl.deleteComment(id),
   listReplies: (commentId) => impl.listReplies(commentId),
   createReply: (commentId, body) => impl.createReply(commentId, body),
   subscribe: (project, handlers) => impl.subscribe(project, handlers),

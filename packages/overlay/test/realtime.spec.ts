@@ -6,7 +6,7 @@ import { PROJECT } from '../src/lib/project'
 import { useCommentsStore } from '../src/stores/comments'
 import { useSessionStore } from '../src/stores/session'
 
-const tom: Me = { id: 'u1', email: 'tom@hfdf.io', name: 'Tom' }
+const tom: Me = { id: 'u1', email: 'tom@hfdf.io', name: 'Tom', role: 'team' }
 
 function rec(overrides: Partial<CommentRec> = {}): CommentRec {
   return {
@@ -40,12 +40,13 @@ function replyRec(overrides: Partial<ReplyRec> = {}): ReplyRec {
 
 function makeMockBackend(overrides: Partial<C11nBackend> = {}): C11nBackend {
   return {
-    login: vi.fn(),
+    invite: vi.fn(),
     logout: vi.fn(),
     me: vi.fn().mockReturnValue(null),
     listComments: vi.fn().mockResolvedValue([]),
     createComment: vi.fn(),
     setResolved: vi.fn().mockResolvedValue(undefined),
+    deleteComment: vi.fn().mockResolvedValue(undefined),
     listReplies: vi.fn().mockResolvedValue([]),
     createReply: vi.fn(),
     subscribe: vi.fn().mockReturnValue(() => {}),

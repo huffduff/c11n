@@ -1,9 +1,10 @@
 <script setup lang="ts">
-// Shell: login flow when signed out; toolbar + comment mode when signed in.
+// Shell: toolbar + comment mode once the proxy's session answered; nothing at
+// all otherwise (the gate sends signed-out visitors to the sign-in page, task
+// 3.8, so there is no in-overlay sign-in state to render).
 // All raw-DOM wiring (picker listeners, SPA nav hook) lives here so the
 // components underneath stay dumb.
-import { onBeforeUnmount, onMounted, ref, watch } from 'vue'
-import LoginPanel from './components/LoginPanel.vue'
+import { onBeforeUnmount, onMounted, watch } from 'vue'
 import Toolbar from './components/Toolbar.vue'
 import Composer from './components/Composer.vue'
 import PinLayer from './components/PinLayer.vue'
@@ -17,7 +18,6 @@ import { normalizePath, onNavigate } from './lib/url'
 
 const session = useSessionStore()
 const comments = useCommentsStore()
-const showLogin = ref(false)
 
 let stopPicking: (() => void) | null = null
 let stopNav: (() => void) | null = null
@@ -31,7 +31,6 @@ watch(
   () => session.isAuthed,
   (authed) => {
     if (authed) {
-      showLogin.value = false
       comments.setPath(normalizePath(location.href))
       stopNav = onNavigate((path) => comments.setPath(path))
       comments.startRealtime()
@@ -100,16 +99,5 @@ onBeforeUnmount(() => {
       v-if="comments.activeCommentId"
       :key="comments.activeCommentId"
     />
-  </template>
-  <template v-else>
-    <button
-      class="c11n-toolbar c11n-signin-chip"
-      type="button"
-      @click="showLogin = !showLogin"
-    >
-      <span class="c11n-logo">c11n</span>
-      <span>Sign in to comment</span>
-    </button>
-    <LoginPanel v-if="showLogin" />
   </template>
 </template>

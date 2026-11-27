@@ -1,0 +1,114 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="robots" content="noindex" />
+    <title>c11n — sign in</title>
+    <link rel="stylesheet" href="/__c11n/auth/signin.css" />
+  </head>
+  <body>
+    <main class="card">
+      <p class="logo">c11n</p>
+      <h1 id="signin-title">Sign in</h1>
+      <!--
+        Two modes (ADR 0006, revised 2026-11-25):
+
+        1. A magic link arrives as /__c11n/auth/#t=<token>. The fragment never
+           leaves the browser, so this page is what turns it into a session: it
+           reads location.hash, shows "Continue to review", and POSTs the token
+           to /__c11n/auth/claim on click. A GET never claims anything, which is
+           what keeps link unfurlers (Slackbot, Outlook Safe Links) from burning
+           the invite before the human clicks it.
+
+        2. No token: this is the signed-out / expired / invalid screen, chosen
+           by ?reason=. The copy is fixed here rather than fetched: the page has
+           to render with no session and no API call, which is exactly the state
+           a signed-out user is in.
+      -->
+      <p class="message" id="signin-message">
+        Your session has expired or you're not signed in. Ask your project
+        contact for a new sign-in link.
+      </p>
+      <p class="hint" id="signin-hint">
+        Invitations are sent by the team running this review. There is no
+        password to enter and no sign-up form.
+      </p>
+      <p class="actions">
+        <button type="button" id="signin-continue" class="button" hidden>
+          Continue to review
+        </button>
+      </p>
+    </main>
+    <script>
+      ;(function () {
+        var title = document.getElementById('signin-title')
+        var message = document.getElementById('signin-message')
+        var hint = document.getElementById('signin-hint')
+        var button = document.getElementById('signin-continue')
+        var params = new URLSearchParams(window.location.search)
+
+        // The token rides in the fragment: no server (and no request log) ever
+        // sees it, and the Referer of the page it lands on cannot leak it.
+        var hash = new URLSearchParams(window.location.hash.replace(/^#/, ''))
+        var token = hash.get('t') || ''
+
+        // M-1: drop the fragment from the address bar as soon as it has been
+        // read. The token is in `token` now, so nothing needs it in the URL —
+        // and leaving it there puts the credential in a screenshot, a
+        // bookmark, a synced browser history or a pasted address. replaceState
+        // (not a reload) keeps `?reason=`/`?next=`, which the page still uses.
+        if (token) {
+          history.replaceState(null, '', window.location.pathname + window.location.search)
+        }
+
+        if (token) {
+          title.textContent = 'Continue to review'
+          message.textContent =
+            "You're one click away. Continue to open this review in your browser."
+          hint.textContent = 'Only continue if you asked for this link or a teammate sent it to you.'
+          button.hidden = false
+          document.body.setAttribute('data-mode', 'continue')
+
+          button.addEventListener('click', function () {
+            button.disabled = true
+            button.textContent = 'Signing in…'
+            fetch('/__c11n/auth/claim', {
+              method: 'POST',
+              credentials: 'same-origin',
+              headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+              body: JSON.stringify({ t: token, next: params.get('next') || undefined }),
+            })
+              .then(function (res) {
+                if (!res.ok) throw new Error('claim failed')
+                return res.json()
+              })
+              .then(function (body) {
+                // Same-origin path: the server has already validated `next`.
+                window.location.assign(body && body.redirect ? body.redirect : '/')
+              })
+              .catch(function () {
+                window.location.assign('/__c11n/auth/?reason=invalid')
+              })
+          })
+          return
+        }
+
+        var reason = params.get('reason') || 'expired'
+        var messages = {
+          expired:
+            "Your session has expired or you're not signed in. Ask your project contact for a new sign-in link.",
+          'signed-out': "You've been signed out.",
+          invalid:
+            'That link has expired or was already used. Ask your project contact for a new one.',
+          legacy:
+            'That sign-in link is out of date. Ask your project contact for a new one.',
+        }
+        if (!messages[reason]) reason = 'expired'
+        title.textContent = reason === 'signed-out' ? 'Signed out' : 'Sign in'
+        message.textContent = messages[reason]
+        document.body.setAttribute('data-reason', reason)
+      })()
+    </script>
+  </body>
+</html>

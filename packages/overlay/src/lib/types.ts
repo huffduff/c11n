@@ -1,10 +1,20 @@
 import type { AnchorMeta } from './anchor'
 
+/** ADR 0008 roles. The overlay only uses this to gate the invite UI. */
+export type Role = 'owner' | 'team' | 'client' | 'agent'
+
 /** The signed-in user, as exposed to the UI. */
 export interface Me {
   id: string
   email: string
   name: string
+  role: Role
+}
+
+/** What POST /api/c11n/invite returns (copy-link MVP, ADR 0006). */
+export interface InviteResult {
+  link: string
+  expiresAt: string
 }
 
 /** A comment record as stored in the backend, mapped for the UI. */

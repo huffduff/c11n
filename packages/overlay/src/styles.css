@@ -94,7 +94,7 @@
   opacity: 0.6;
 }
 
-.c11n-login-error {
+.c11n-invite-error {
   margin: 0;
   font-size: 12px;
   color: #c0392b;
@@ -487,6 +487,37 @@
   background: #f2f2f7;
 }
 
+/* A row plus its trailing row action (Reopen on the Resolved tab, task 3.10).
+   The action is a sibling button, not nested: a button inside a button is
+   invalid HTML and swallows the row's click in some browsers. */
+.c11n-sidebar-row-wrap {
+  position: relative;
+}
+
+.c11n-sidebar-reopen {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  padding: 2px 8px;
+  border: 1px solid #d0d0d8;
+  border-radius: 999px;
+  font: inherit;
+  font-size: 11px;
+  font-weight: 600;
+  color: #444;
+  background: #fff;
+  cursor: pointer;
+}
+
+.c11n-sidebar-reopen:hover:not(:disabled) {
+  border-color: #1a1a1a;
+  color: #1a1a1a;
+}
+
+.c11n-popover-delete {
+  color: #c0392b;
+}
+
 .c11n-sidebar-row-body {
   color: #1a1a1a;
 }
@@ -509,4 +540,44 @@
    overlay-owned elements and acts as a documented hook. */
 .c11n-flash {
   transition: outline-color 0.2s ease-in-out;
+}
+
+/* ---- Invite section (sidebar, owner/team only) --------------------------- */
+.c11n-invite {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px 16px;
+  border-bottom: 1px solid #e6e6ee;
+  background: #fafafc;
+}
+
+.c11n-invite-title {
+  margin: 0;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: #6b6b80;
+}
+
+.c11n-invite-form,
+.c11n-invite-result {
+  display: flex;
+  gap: 6px;
+  align-items: stretch;
+}
+
+.c11n-invite-email,
+.c11n-invite-link {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.c11n-invite-link {
+  font-size: 12px;
+}
+
+.c11n-invite-role {
+  flex: 0 0 auto;
 }

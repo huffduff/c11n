@@ -6,6 +6,7 @@ import { setBackend } from '../src/lib/backend'
 import type { C11nBackend, CommentRec, ReplyRec } from '../src/lib/api'
 import { PROJECT } from '../src/lib/project'
 import { useCommentsStore } from '../src/stores/comments'
+import { useSessionStore } from '../src/stores/session'
 import ThreadPopover from '../src/components/ThreadPopover.vue'
 
 vi.mock('@floating-ui/dom', async (importOriginal) => {
@@ -47,12 +48,13 @@ function reply(overrides: Partial<ReplyRec> = {}): ReplyRec {
 
 function makeMockBackend(overrides: Partial<C11nBackend> = {}): C11nBackend {
   return {
-    login: vi.fn(),
+    invite: vi.fn(),
     logout: vi.fn(),
     me: vi.fn().mockReturnValue(null),
     listComments: vi.fn().mockResolvedValue([]),
     createComment: vi.fn(),
     setResolved: vi.fn().mockResolvedValue(undefined),
+    deleteComment: vi.fn().mockResolvedValue(undefined),
     listReplies: vi.fn().mockResolvedValue([reply()]),
     createReply: vi.fn(),
     subscribe: vi.fn().mockReturnValue(() => {}),
@@ -84,6 +86,10 @@ describe('ThreadPopover.vue', () => {
   async function mountPopover(comment = rec(), backend: Partial<C11nBackend> = {}) {
     const mock = makeMockBackend(backend)
     setBackend(mock)
+    // The actions are role-gated (task 3.10). These tests are about the
+    // popover's mechanics, so sign in as the comment's author (role=client),
+    // which is allowed to resolve and delete its own thread.
+    useSessionStore().me = { id: comment.author, email: 'tom@hfdf.io', name: 'Tom', role: 'client' }
     const store = useCommentsStore()
     store.currentPath = comment.path
     store.items = [comment]
@@ -188,5 +194,26 @@ describe('ThreadPopover.vue', () => {
     await mountPopover(rec({ selector: '#gone', anchorMeta: null }))
 
     expect(computePosition).not.toHaveBeenCalled()
+  })
+
+  it('opens on a record that lands after the click (row clicked before the list loaded)', async () => {
+    const mock = makeMockBackend()
+    setBackend(mock)
+    const comment = rec()
+    useSessionStore().me = { id: comment.author, email: 'tom@hfdf.io', name: 'Tom', role: 'client' }
+    const store = useCommentsStore()
+    store.currentPath = comment.path
+    // The click happened, the page's comment list has not answered yet.
+    store.openThread(comment.id)
+    wrapper = mount(ThreadPopover, { global: { plugins: [pinia] } })
+    await flush(wrapper)
+    expect(wrapper.find('.c11n-popover').exists()).toBe(false)
+
+    store.items = [comment]
+    await flush(wrapper)
+
+    expect(wrapper.find('.c11n-popover-body').text()).toBe('Too expensive')
+    expect(mock.listReplies).toHaveBeenCalledWith('c1')
+    expect(computePosition).toHaveBeenCalledTimes(1)
   })
 })

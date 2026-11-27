@@ -1,0 +1,72 @@
+{{- $name := include "c11n.fullname" . }}
+{{- /*
+Three Services, all ClusterIP:
+  <fullname>-caddy              the review origin; the ONLY one an Ingress
+                                publishes (the review Ingress's backend)
+  <fullname>-pocketbase         internal: caddy's gate and proxy reach it, and
+                                the optional admin Ingress points at it
+  <fullname>-pocketbase-headless  clusterIP None, the StatefulSet's governing
+                                Service (stable pod DNS)
+
+The old single Service (<fullname>, with the 8090 port added only when
+adminIngress was on) is gone: a single port on a single pod is exactly what the
+split removed. <fullname>-pocketbase is always rendered and always ClusterIP -
+it is cluster-internal, and whether anything outside the cluster may reach it
+is the NetworkPolicy's decision, not a Service type.
+*/}}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $name }}-caddy
+  labels:
+    {{- include "c11n.componentLabels" (dict "root" . "component" "caddy") | nindent 4 }}
+spec:
+  type: ClusterIP
+  selector:
+    {{- include "c11n.componentSelector" (dict "root" . "component" "caddy") | nindent 4 }}
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http
+      protocol: TCP
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $name }}-pocketbase
+  labels:
+    {{- include "c11n.componentLabels" (dict "root" . "component" "pocketbase") | nindent 4 }}
+  annotations:
+    c11n.io/internal: >-
+      Cluster-internal. Caddy reaches it as {{ $name }}-pocketbase:8090 and the
+      optional admin Ingress points at it; the NetworkPolicy is what limits who
+      may dial it.
+spec:
+  type: ClusterIP
+  selector:
+    {{- include "c11n.componentSelector" (dict "root" . "component" "pocketbase") | nindent 4 }}
+  ports:
+    - name: pb
+      port: 8090
+      targetPort: pb
+      protocol: TCP
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $name }}-pocketbase-headless
+  labels:
+    {{- include "c11n.componentLabels" (dict "root" . "component" "pocketbase") | nindent 4 }}
+spec:
+  # Governs the StatefulSet: pod 0 gets <pod>.<service>.<ns>.svc. No traffic
+  # goes through it (a headless Service resolves to pod IPs and nothing else),
+  # which is why caddy addresses the ClusterIP Service above instead.
+  type: ClusterIP
+  clusterIP: None
+  selector:
+    {{- include "c11n.componentSelector" (dict "root" . "component" "pocketbase") | nindent 4 }}
+  ports:
+    - name: pb
+      port: 8090
+      targetPort: pb
+      protocol: TCP

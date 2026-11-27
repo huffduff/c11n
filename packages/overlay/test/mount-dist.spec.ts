@@ -31,7 +31,11 @@ describe('built bundle (dist/overlay.js)', () => {
       expect(host).not.toBeNull()
       expect(host!.shadowRoot).not.toBeNull()
       expect(host!.shadowRoot!.querySelector('style')?.textContent).toContain('.c11n-toolbar')
-      expect(host!.shadowRoot!.querySelector('.c11n-toolbar')?.textContent).toContain('c11n')
+      // The styles are there, the shell is empty: with no session (`me()`
+      // answers 401 here — there is no proxy) the overlay renders nothing, so
+      // there is no login form to fall back to either.
+      expect(host!.shadowRoot!.querySelector('.c11n-toolbar')).toBeNull()
+      expect(host!.shadowRoot!.querySelector('input')).toBeNull()
     },
   )
 })

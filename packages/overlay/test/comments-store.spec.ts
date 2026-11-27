@@ -31,12 +31,13 @@ function rec(overrides: Partial<CommentRec> = {}): CommentRec {
 
 function makeMockBackend(overrides: Partial<C11nBackend> = {}): C11nBackend {
   return {
-    login: vi.fn(),
+    invite: vi.fn(),
     logout: vi.fn(),
     me: vi.fn().mockReturnValue(null),
     listComments: vi.fn().mockResolvedValue([]),
     createComment: vi.fn().mockResolvedValue(rec()),
     setResolved: vi.fn().mockResolvedValue(undefined),
+    deleteComment: vi.fn().mockResolvedValue(undefined),
     listReplies: vi.fn().mockResolvedValue([]),
     createReply: vi.fn(),
     subscribe: vi.fn().mockReturnValue(() => {}),
@@ -256,7 +257,7 @@ describe('useCommentsStore', () => {
   // Whichever lands second must not erase the name, or the UI falls back to
   // the literal "author".
   describe('author name across the echo/HTTP race', () => {
-    const me = { id: 'u1', email: 'alice@example.com', name: 'Alice' }
+    const me = { id: 'u1', email: 'alice@example.com', name: 'Alice', role: 'client' as const }
     /** A record as the backend maps it without `expand: 'author'`. */
     const noName = <T extends { authorName?: string }>(r: T): T => ({ ...r, authorName: undefined })
 

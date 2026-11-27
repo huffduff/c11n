@@ -1,5 +1,5 @@
 import { expect, test } from '@playwright/test'
-import { GO_PORT } from '../fixtures'
+import { EXTERNAL, GO_PORT, createUser, sessionCookie, signInAs } from '../fixtures'
 
 /**
  * Topology specs: the same proxy, two different upstreams.
@@ -21,6 +21,8 @@ test.describe('go-served production topology', () => {
   test('a deep link is served from the SPA fallback with the overlay injected', async ({
     page,
   }) => {
+    // Signed in first: since 3.8 every page of the site is behind the gate.
+    await signInAs(page)
     // No client-side navigation first: this is a cold request for a route the
     // static bundle has no file for, so it can only work if the Go server
     // falls back to index.html and Caddy rewrites that response.
@@ -33,11 +35,11 @@ test.describe('go-served production topology', () => {
     // fallback index.html and not from the app itself (the app ships no c11n
     // code).
     await expect(page.locator('#c11n-root')).toBeAttached()
-    await expect(page.locator('.c11n-signin-chip')).toBeVisible()
+    await expect(page.locator('.c11n-toolbar')).toBeVisible()
   })
 
   test('the same-origin Go API answers through the proxy', async ({ page }) => {
-    await page.goto('/')
+    await signInAs(page)
 
     // The home view fetches /api/ping; "api: go" means the browser reached
     // the Go API on the same origin via Caddy, not that the page guessed.
@@ -45,6 +47,10 @@ test.describe('go-served production topology', () => {
   })
 
   test('a gzip-accepting HTML request is still rewritten', async ({ request }) => {
+    // The direct-to-upstream half talks to 127.0.0.1:<GO_PORT>, which exists
+    // only in the local stack. In external mode the deployment's upstream is
+    // inside the cluster, so only the through-the-proxy half can run.
+    test.skip(EXTERNAL, 'the upstream port is not reachable in external mode')
     // Caddy sends `header_up Accept-Encoding identity` upstream precisely
     // because a compressed body would make the `</head>` replace silently do
     // nothing. The fixture gzips whenever it is asked to, so this request
@@ -54,8 +60,11 @@ test.describe('go-served production topology', () => {
     })
     expect(upstream.headers()['content-encoding']).toBe('gzip')
 
+    // Through the proxy a session is required now, so the gzip behaviour is
+    // checked with one.
+    const cookie = await sessionCookie((await createUser()).email)
     const res = await request.get('/', {
-      headers: { accept: 'text/html', 'accept-encoding': 'gzip' },
+      headers: { accept: 'text/html', 'accept-encoding': 'gzip', cookie },
     })
     expect(res.status()).toBe(200)
     expect(await res.text()).toContain(overlayTag)
@@ -66,10 +75,11 @@ test.describe('go-served production topology', () => {
   test('a missing asset 404s through the proxy instead of returning HTML', async ({
     request,
   }) => {
+    const cookie = await sessionCookie((await createUser()).email)
     // The Go server must not answer asset paths with index.html: a module
     // answered with HTML fails in a way that looks like a proxy bug.
     const res = await request.get('/assets/definitely-missing.js', {
-      headers: { accept: '*/*' },
+      headers: { accept: '*/*', cookie },
     })
     expect(res.status()).toBe(404)
   })
@@ -82,6 +92,8 @@ test.describe('vite dev topology', () => {
     const messages: string[] = []
     page.on('console', (msg) => messages.push(msg.text()))
 
+    // The listener goes on first: signInAs is already a full page load of /.
+    await signInAs(page)
     await page.goto('/')
 
     // Vite's client logs "[vite] connected." on a working websocket. Waiting

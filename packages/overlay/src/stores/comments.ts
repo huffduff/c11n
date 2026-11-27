@@ -416,15 +416,56 @@ export const useCommentsStore = defineStore('comments', {
 
     /** Mark resolved in place — PinLayer drops the pin reactively. */
     async resolve(commentId: string) {
+      await this.setThreadResolved(commentId, true)
+    },
+
+    /** Reopen (ADR 0008): owner/team any thread, client own, never the agent. */
+    async reopen(commentId: string) {
+      await this.setThreadResolved(commentId, false)
+    },
+
+    /**
+     * Resolve and reopen are the same PATCH with a different value. Update
+     * both the per-page list and the project-wide sidebar copy, so the row
+     * moves between tabs even when the realtime echo is slow or absent (unit
+     * tests, or a dropped subscription).
+     */
+    async setThreadResolved(commentId: string, resolved: boolean) {
       this.error = null
-      this.loading = true // disables the Resolve button; prevents double-fire
+      this.loading = true // disables the button; prevents double-fire
       try {
-        await backend.setResolved(commentId, true)
+        await backend.setResolved(commentId, resolved)
         const item = this.items.find((c) => c.id === commentId)
-        if (item) item.resolved = true
+        if (item) item.resolved = resolved
+        const row = this.sidebarComments.find((c) => c.id === commentId)
+        if (row) row.resolved = resolved
+        // Resolving closes the thread; reopening leaves the cursor where it is
+        // (the reviewer is looking at the row they just reopened).
+        if (resolved && this.activeCommentId === commentId) this.activeCommentId = null
+      } catch {
+        this.error = resolved ? 'Could not resolve comment' : 'Could not reopen comment'
+      } finally {
+        this.loading = false
+      }
+    },
+
+    /**
+     * Delete a comment (owner: anyone's; everyone else: their own). Replies
+     * cascade server-side. The id is remembered as deleted before the local
+     * removal so a realtime create/update echo still in flight cannot resurrect
+     * the row.
+     */
+    async deleteComment(commentId: string) {
+      this.error = null
+      this.loading = true
+      try {
+        await backend.deleteComment(commentId)
+        this.rememberDeleted(commentId)
+        this.removeFromRealtime(commentId)
+        this.sidebarComments = this.sidebarComments.filter((c) => c.id !== commentId)
         if (this.activeCommentId === commentId) this.activeCommentId = null
       } catch {
-        this.error = 'Could not resolve comment'
+        this.error = 'Could not delete comment'
       } finally {
         this.loading = false
       }

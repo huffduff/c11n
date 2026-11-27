@@ -10,6 +10,7 @@ import {
   resetData,
   seedComment,
   seedReply,
+  userToken,
 } from '../fixtures'
 
 // PocketBase's JS SDK opens the SSE stream with a global `EventSource`.
@@ -34,8 +35,6 @@ if (typeof (globalThis as { EventSource?: unknown }).EventSource === 'undefined'
  * is also the experiment that decides whether relation filters work for
  * realtime on PocketBase 0.39.x at all.
  */
-const PASSWORD = 'password123456'
-
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms))
 
 test.beforeEach(async () => {
@@ -55,7 +54,9 @@ test('a reply in project Y does not reach a project-X subscriber', async () => {
   const commentY2 = await seedComment({ author: bob.id, project: projectY, body: 'in Y again' })
 
   const pb = new PocketBase(creds.pbUrl)
-  await pb.collection('users').authWithPassword(alice.email, PASSWORD)
+  // No password auth any more (3.9): a superuser mints an impersonation token
+  // and the SDK uses it as its bearer.
+  pb.authStore.save(await userToken(alice.email), null)
 
   const received: Array<{ id: string; body: string }> = []
   await pb.collection('replies').subscribe(

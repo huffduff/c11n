@@ -43,6 +43,21 @@ reviewed project*.
   httpOnly cookie handled at the proxy. The overlay never holds a bearer
   token, so neither the reviewed app's JS nor the third-party scripts it
   loads can read the session and take it elsewhere.
+- **Keeping the credential out of the upstream request.** Caddy strips only
+  the `c11n_session` cookie from the `Cookie` header it forwards to the
+  reviewed app (the app's own cookies pass through untouched), and renames
+  an upstream `Set-Cookie: c11n_session=…` to `c11n_blocked=…`, so the
+  reviewed server can neither read the session nor replace it. What it does
+  receive is `X-C11n-User` and `X-C11n-Role`: an account id and a role, no
+  credential. That is an intentional, stable interface — it lets the
+  reviewed app personalise itself without knowing anything token-shaped —
+  and it is the only identity the proxy hands over.
+- **No token-minting routes through the proxy.** `/__c11n/pb/*` answers 403
+  to PocketBase's auth endpoints (`auth-refresh`, `auth-with-password`,
+  `request-password-reset`, `impersonate/…`, and the rest), which exist only
+  to return a bearer token. The overlay uses none of them. Without that
+  block, same-origin page JS could have called `auth-refresh` and read a
+  token out of the JSON body.
 - **Same-origin by construction.** No CORS, and SSE works.
 
 **It does not give us:**
@@ -50,10 +65,12 @@ reviewed project*.
 - **Isolation from the reviewed app's own JS.** The overlay runs
   same-origin with the reviewed app. Any script on the page can make
   same-origin requests to `/__c11n/pb/*`, and the browser attaches the
-  cookie. So in-session actions can't be isolated from that app's code.
-  The reviewed app, our own project, is **inside** the trust boundary.
-  Third-party scripts it loads (analytics, chat widgets) are the real
-  residual risk. Fully isolating that would mean serving c11n from a
+  cookie — so it acts *as* the signed-in user (subject to the collection
+  rules) even though it never sees the cookie value and cannot mint a
+  token. In-session actions therefore can't be isolated from that app's
+  code. The reviewed app, our own project, is **inside** the trust
+  boundary. Third-party scripts it loads (analytics, chat widgets) are the
+  real residual risk. Fully isolating that would mean serving c11n from a
   separate origin, e.g. an iframe on a sibling host. That is not worth it
   for the dogfood run.
 - **Identity inside the reviewed app.** If the staging site has its own

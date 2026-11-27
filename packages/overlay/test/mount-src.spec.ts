@@ -10,6 +10,9 @@ describe('src/main.ts bootstrap', () => {
     const host = hosts[0] as HTMLElement
     expect(host.shadowRoot).not.toBeNull()
     expect(host.shadowRoot!.querySelector('style')?.textContent).toContain(':host')
-    expect(host.shadowRoot!.querySelector('.c11n-toolbar')?.textContent).toContain('c11n')
+    // No toolbar here: the shell renders nothing until /api/c11n/me answers,
+    // and this test mounts with no proxy in front of it. The signed-in shell is
+    // covered by app.spec.ts with a mocked backend.
+    expect(host.shadowRoot!.querySelector('.c11n-toolbar')).toBeNull()
   })
 })

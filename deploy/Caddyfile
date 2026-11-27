@@ -28,9 +28,101 @@
 }
 
 {$C11N_LISTEN::8080} {
+	# ---- the session gate (ADR 0006, task 3.8) -----------------------------
+	# Every route except the public identity surface asks the pod-internal
+	# session route first. 2xx passes (with the identity copied into
+	# X-C11n-User/X-C11n-Role); for an HTML navigation the hook's 302 to the
+	# sign-in page is relayed verbatim; everything else gets a 401.
+	#
+	# The admin UI is excluded here only so it can answer 404 without a
+	# session — it must never be reachable on the review host at all.
+	@gated not path /__c11n/auth/* /__c11n/pb/_/*
+	forward_auth @gated {$C11N_PB_ADDR:pocketbase:8090} {
+		uri /api/c11n/session
+		copy_headers X-C11n-User X-C11n-Role
+	}
+
+	# PocketBase's admin UI (_/) on the review host: 404, not a redirect and
+	# not a hint that a PocketBase lives here.
+	handle /__c11n/pb/_/* {
+		respond 404
+	}
+
+	# ---- public identity surface (ADR 0006) --------------------------------
+	# The only routes with no session gate in front of them (3.8): the sign-in
+	# page, and the two routes that create or clear the session cookie. Caddy
+	# rewrites those routes onto the PocketBase hook routes of the same name.
+	#
+	# Every one of these responses is `private, no-store` (M-1/M-3): they carry
+	# or answer for a bearer, and a cached claim or landing page could be
+	# replayed. claim is a POST with a JSON body: the token never travels in a
+	# URL, so the request log (and any unfurler) never sees it.
+	#
+	# M-6: the legacy `?t=` route is a static 302 here and NEVER reaches
+	# PocketBase. The hook route it used to rewrite to is gone: PocketBase's
+	# request logger stores the full request URL, so a request that reached it
+	# wrote the freshly minted token into `_logs`.
+	handle /__c11n/auth/magic {
+		header Cache-Control "private, no-store"
+		# The explicit `*` matcher is required: without it Caddy sees the
+		# leading `/` of the target as an inline path matcher and redirects to
+		# the string "302" instead (verified in `caddy adapt`).
+		redir * "/__c11n/auth/?reason=legacy" 302
+	}
+
+	handle /__c11n/auth/claim {
+		header Cache-Control "private, no-store"
+		rewrite * /api/c11n/auth/claim
+		reverse_proxy {$C11N_PB_ADDR:pocketbase:8090}
+	}
+
+	handle /__c11n/auth/logout {
+		header Cache-Control "private, no-store"
+		rewrite * /api/c11n/auth/logout
+		reverse_proxy {$C11N_PB_ADDR:pocketbase:8090}
+	}
+
+	# Static sign-in page. handle_path strips the prefix, so /__c11n/auth/
+	# serves index.html out of C11N_SIGNIN_DIR.
+	#
+	# C11N_SIGNIN_DIR IS PUBLIC: everything under it is served to anonymous
+	# visitors at `/__c11n/auth/*`, so put nothing else there — no source maps,
+	# no `.env`, no notes. `packages/signin/` holds the page, its stylesheet and
+	# its README, and nothing else (M-7).
+	handle_path /__c11n/auth/* {
+		header Cache-Control "private, no-store"
+		root * {$C11N_SIGNIN_DIR:/srv/signin}
+		file_server
+	}
+
 	# PocketBase API + realtime, same-origin under /__c11n/pb/
 	handle_path /__c11n/pb/* {
+		# M-3: nothing under here is cacheable — it is authenticated data and
+		# gate answers. A deferred (`>`) header op runs after the proxy has
+		# written its headers, so it also wins over whatever PocketBase sent,
+		# and it covers the 403 below, which a header_down inside the proxy
+		# could not.
+		header >Cache-Control "private, no-store"
+		# I-1: PocketBase mints bearer tokens on the routes below and returns
+		# them in a JSON body. Caddy injects the httpOnly session cookie as
+		# Authorization on this prefix, so without this a script on the reviewed
+		# page could POST to .../auth-refresh and read `{token}` — defeating the
+		# whole httpOnly design. The overlay calls none of them (it uses
+		# /api/c11n/{me,invite} and plain collection reads/writes); they are
+		# blocked here, before PocketBase sees the request.
+		#
+		# path_regexp, not a `*` wildcard: Caddy's path matcher works on path
+		# segments and this has to cross them ([^/]+ = one collection segment).
+		# The prefix is already stripped by handle_path, so the match is against
+		# /api/collections/<collection>/<action>.
+		@token_minting path_regexp mint ^/api/collections/[^/]+/(auth-refresh|auth-with-password|auth-with-otp|request-otp|request-password-reset|confirm-password-reset|request-email-change|confirm-email-change|impersonate/[^/]+|auth-with-oauth2|auth-methods|request-verification)/?$
+		respond @token_minting 403
 		reverse_proxy {$C11N_PB_ADDR:pocketbase:8090} {
+			# The overlay never holds a token: whatever the session cookie
+			# carries IS the Authorization for this prefix, and a client-sent
+			# header is overwritten (never forwarded) — a forged bearer must
+			# not outrank the cookie the gate just validated.
+			header_up Authorization {http.request.cookie.c11n_session}
 			# SSE: stream responses immediately
 			flush_interval -1
 		}
@@ -48,12 +140,35 @@
 			# don't let upstream compress; replace needs plaintext
 			header_up Accept-Encoding identity
 			import upstream_tls_{$C11N_UPSTREAM_TLS:verify}
+			# I-2: the reviewed app (and any script it loads) must never see the
+			# session cookie. Strip ONLY c11n_session from the request Cookie
+			# header: the app's own cookies keep flowing, in every position
+			# (first, middle, last), and the leading `; ` of a middle hit goes
+			# with it. When c11n_session is the only cookie the expression
+			# leaves an empty header value, which every server treats as "no
+			# cookies" — harmless, and deleting it conditionally is not
+			# expressible here.
+			header_up Cookie "(^|;\s*)c11n_session=[^;]*" ""
+			# ... and it cannot set one either: an upstream Set-Cookie for the
+			# session name is renamed, so the browser stores an inert
+			# c11n_blocked cookie instead of replacing the bearer. The replace
+			# applies to each Set-Cookie value independently, so the app's own
+			# cookies in the same response are unaffected.
+			header_down Set-Cookie "(?i)^\s*c11n_session=" "c11n_blocked="
 			# staging-review tradeoff: strip CSP so the injected script runs
 			header_down -Content-Security-Policy
 		}
+		# A gated page must not be replayed from the browser cache after the
+		# session ends. Without this, a 200 HTML response served while signed in
+		# can satisfy the next navigation from cache and skip the gate entirely
+		# (the go fixture's FileServer sends no Cache-Control at all, so Chromium
+		# applies heuristic freshness). Matched on the request's Accept, like the
+		# injection below: a response-header matcher runs before Content-Type is
+		# known and would never fire.
+		@html header Accept *text/html*
+		header @html >Cache-Control "private, no-store"
 		# Only rewrite responses to HTML-document requests, so JS/JSON bodies
 		# containing a literal "</head>" are never mangled.
-		@html header Accept *text/html*
 		replace @html stream {
 			`</head>` `<script src="/__c11n/overlay.js" defer></script></head>`
 		}

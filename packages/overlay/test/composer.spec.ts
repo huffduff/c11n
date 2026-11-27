@@ -24,12 +24,13 @@ const anchor: Anchor = {
 
 function makeMockBackend(overrides: Partial<C11nBackend> = {}): C11nBackend {
   return {
-    login: vi.fn(),
+    invite: vi.fn(),
     logout: vi.fn(),
     me: vi.fn().mockReturnValue(null),
     listComments: vi.fn().mockResolvedValue([]),
     createComment: vi.fn(),
     setResolved: vi.fn().mockResolvedValue(undefined),
+    deleteComment: vi.fn().mockResolvedValue(undefined),
     listReplies: vi.fn().mockResolvedValue([]),
     createReply: vi.fn(),
     subscribe: vi.fn().mockReturnValue(() => {}),

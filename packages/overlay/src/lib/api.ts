@@ -1,17 +1,25 @@
-import PocketBase from 'pocketbase'
-import type { CommentRec, Me, NewComment, RealtimeHandlers, ReplyRec } from './types'
+import PocketBase, { BaseAuthStore } from 'pocketbase'
+import { goToSignIn } from './signin'
+import type { CommentRec, InviteResult, Me, NewComment, RealtimeHandlers, ReplyRec, Role } from './types'
 
-export type { CommentRec, Me, NewComment, RealtimeHandlers, ReplyRec }
+export type { CommentRec, InviteResult, Me, NewComment, RealtimeHandlers, ReplyRec, Role }
 
 /**
  * Swappable data-access layer for the overlay. The UI only ever talks to
  * this interface; `createPocketBaseBackend` is the v1 implementation.
- * A later Go swap reimplements these 8 methods + SSE behind `subscribe`.
+ * A later Go swap reimplements these methods + SSE behind `subscribe`.
+ *
+ * Identity is the proxy's, not the page's (ADR 0006): the backend never holds
+ * a token, `me()` reads the session cookie through the proxy and `logout()`
+ * clears that cookie before leaving for the sign-in page.
  */
 export interface C11nBackend {
-  login(email: string, password: string): Promise<Me>
-  logout(): void
-  me(): Me | null
+  /** The signed-in user, or null when the session cookie is gone/expired. */
+  me(): Promise<Me | null>
+  /** Clears the cookie (public route) and navigates to the sign-in page. */
+  logout(): Promise<void>
+  /** Owner/team: mint a copy-link invite for `email` at `role`. */
+  invite(email: string, role: Role): Promise<InviteResult>
   /**
    * Comments sorted by `created` asc. With `path`: the hot per-page query.
    * Without `path`: every comment in the project (sidebar listing) — any
@@ -20,6 +28,8 @@ export interface C11nBackend {
   listComments(project: string, path?: string): Promise<CommentRec[]>
   createComment(input: NewComment): Promise<CommentRec>
   setResolved(id: string, resolved: boolean): Promise<void>
+  /** Owner (any comment) or author (own). The rules answer the same question. */
+  deleteComment(id: string): Promise<void>
   listReplies(commentId: string): Promise<ReplyRec[]>
   createReply(commentId: string, body: string): Promise<ReplyRec>
   subscribe(project: string, handlers: RealtimeHandlers): () => void
@@ -29,7 +39,16 @@ export interface C11nBackend {
 type AnyRecord = { [key: string]: any }
 
 export function createPocketBaseBackend(baseUrl = '/__c11n/pb'): C11nBackend {
-  const pb = new PocketBase(baseUrl)
+  // An in-memory auth store on purpose: the SDK's default LocalAuthStore
+  // persists a token in localStorage, which is exactly the exposure ADR 0006
+  // removes. The SDK never authenticates here at all — Caddy turns the
+  // httpOnly c11n_session cookie into Authorization for /__c11n/pb/*.
+  const pb = new PocketBase(baseUrl, new BaseAuthStore())
+
+  // Last successful `me()`. Writes need the author id, and the SDK has no
+  // record to read it from — every request is authenticated by the proxy, not
+  // by a token this page owns.
+  let current: Me | null = null
 
   // The overlay deals in project *slugs* (`window.__C11N_PROJECT` → 'default'),
   // but PocketBase stores `comments.project` as a relation holding the project
@@ -43,9 +62,11 @@ export function createPocketBaseBackend(baseUrl = '/__c11n/pb'): C11nBackend {
   function resolveProjectId(slug: string): Promise<string> {
     let pending = projectIdBySlug.get(slug)
     if (!pending) {
-      pending = pb
-        .collection('projects')
-        .getFirstListItem(pb.filter('slug = {:slug}', { slug }))
+      pending = guard(() =>
+        pb
+          .collection('projects')
+          .getFirstListItem(pb.filter('slug = {:slug}', { slug })),
+      )
         .then((rec: AnyRecord) => {
           slugById.set(rec.id, slug)
           return rec.id as string
@@ -61,7 +82,31 @@ export function createPocketBaseBackend(baseUrl = '/__c11n/pb'): C11nBackend {
   }
 
   function mapMe(r: AnyRecord): Me {
-    return { id: r.id, email: r.email, name: r.name || r.email }
+    return { id: r.id, email: r.email, name: r.name || r.email, role: (r.role as Role) ?? 'client' }
+  }
+
+  // M-4: a 401 from ANY request means the session cookie died — it expired, or
+  // a sign-out in another tab rotated the user's tokenKey. Only `me()` used to
+  // notice, so a write would throw while the UI still claimed the user was
+  // signed in. Every SDK call goes through `guard`, which hands the user to
+  // the sign-in page once and then lets the original error through.
+  let redirecting = false
+  /** Route a dead-session answer to the sign-in page, once. */
+  function noteUnauthorized(status: number): void {
+    if (redirecting || status !== 401) return
+    redirecting = true
+    current = null
+    goToSignIn('expired')
+  }
+
+  async function guard<T>(run: () => Promise<T>): Promise<T> {
+    try {
+      return await run()
+    } catch (err) {
+      const e = err as { status?: number; response?: { status?: number } } | null
+      noteUnauthorized(e?.status ?? e?.response?.status ?? 0)
+      throw err
+    }
   }
 
   /** Display name from an expanded author relation, if present. */
@@ -113,28 +158,68 @@ export function createPocketBaseBackend(baseUrl = '/__c11n/pb'): C11nBackend {
     }
   }
 
-  /** Current auth record or throw — used by writes that inject `author`. */
-  function requireAuth(): AnyRecord {
-    const r = pb.authStore.record
-    if (!r) throw new Error('c11n: not signed in')
-    return r
+  /** The session user, or throw — used by writes that inject `author`. */
+  function requireAuth(): Me {
+    if (!current) throw new Error('c11n: not signed in')
+    return current
   }
 
   return {
-    async login(email, password) {
-      const res = await pb.collection('users').authWithPassword(email, password)
-      return mapMe(res.record)
+    async me() {
+      const res = await fetch(`${baseUrl}/api/c11n/me`, {
+        headers: { Accept: 'application/json' },
+        // Same origin, and the cookie is HttpOnly: the browser attaches it and
+        // Caddy turns it into Authorization before PocketBase sees the request.
+        credentials: 'same-origin',
+      })
+      if (res.status === 401) {
+        current = null
+        return null
+      }
+      if (!res.ok) throw new Error(`c11n: me failed (${res.status})`)
+      const body = (await res.json()) as AnyRecord
+      current = mapMe(body)
+      return current
     },
 
-    logout() {
+    async logout() {
+      current = null
       pb.authStore.clear()
+      try {
+        await fetch('/__c11n/auth/logout', { method: 'POST', credentials: 'same-origin' })
+      } finally {
+        // Leave even if clearing failed: staying on a page the gate will
+        // reject on the next request is worse than one extra sign-in.
+        location.assign('/__c11n/auth/?reason=signed-out')
+      }
     },
 
-    me() {
-      // authStore is hydrated from localStorage by the SDK, so this reflects
-      // persisted sessions across page loads.
-      const r = pb.authStore.record
-      return r ? mapMe(r) : null
+    async invite(email, role) {
+      const res = await fetch(`${baseUrl}/api/c11n/invite`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+        credentials: 'same-origin',
+        body: JSON.stringify({ email, role }),
+      })
+      const text = await res.text()
+      let body: { link?: string; expiresAt?: string; message?: string } = {}
+      try {
+        body = text ? (JSON.parse(text) as typeof body) : {}
+      } catch {
+        // A non-JSON body is an error page, not an invite.
+      }
+      if (!res.ok) {
+        // M-4: an invite with no session is the same dead-session answer as an
+        // SDK call; route it the same way (once).
+        noteUnauthorized(res.status)
+        const err = new Error(body.message || `Invite failed (${res.status})`) as Error & {
+          status?: number
+        }
+        err.status = res.status
+        throw err
+      }
+      if (!body.link) throw new Error('Invite returned no link')
+      return { link: body.link, expiresAt: body.expiresAt ?? '' }
     },
 
     async listComments(project, path) {
@@ -144,11 +229,22 @@ export function createPocketBaseBackend(baseUrl = '/__c11n/pb'): C11nBackend {
         path === undefined
           ? pb.filter('project = {:projectId}', { projectId })
           : pb.filter('project = {:projectId} && path = {:path}', { projectId, path })
-      const records = await pb.collection('comments').getFullList({
-        filter,
-        sort: 'created',
-        expand: 'author',
-      })
+      const records = await guard(() =>
+        pb.collection('comments').getFullList({
+          filter,
+          sort: 'created',
+          expand: 'author',
+          // The SDK's automatic cancel key is method+path (query ignored), so
+          // the per-page list and the project-wide sidebar list — same
+          // collection, same path — abort each other whenever both are in
+          // flight. On a remote link that is every page load with the sidebar
+          // open: the page list died, `items` stayed empty, and the page kept
+          // no pins and no thread popover until a reload. A key per query
+          // keeps "ignore this stale answer" where it belongs: the store's
+          // own path/sidebar tokens.
+          requestKey: `c11n:comments:${path ?? '*'}`,
+        }),
+      )
       return records.map(mapComment)
     },
 
@@ -158,22 +254,37 @@ export function createPocketBaseBackend(baseUrl = '/__c11n/pb'): C11nBackend {
       // Expand the author: the create response is upserted over the realtime
       // echo, and the echo carries no expand — without this the HTTP record
       // (authorName undefined) would blank the name backfilled from session.
-      const rec = await pb
-        .collection('comments')
-        .create({ ...input, project: projectId, author: me.id }, { expand: 'author' })
+      const rec = await guard(() =>
+        pb
+          .collection('comments')
+          .create({ ...input, project: projectId, author: me.id }, { expand: 'author' }),
+      )
       return mapComment(rec)
     },
 
     async setResolved(id, resolved) {
-      await pb.collection('comments').update(id, { resolved })
+      await guard(() => pb.collection('comments').update(id, { resolved }))
+    },
+
+    async deleteComment(id) {
+      // The replies cascade server-side (the `replies.comment` relation is
+      // cascadeDelete), so there is no second call to make here.
+      await guard(() => pb.collection('comments').delete(id))
     },
 
     async listReplies(commentId) {
-      const records = await pb.collection('replies').getFullList({
-        filter: pb.filter('comment = {:commentId}', { commentId }),
-        sort: 'created',
-        expand: 'author',
-      })
+      const records = await guard(() =>
+        pb.collection('replies').getFullList({
+          filter: pb.filter('comment = {:commentId}', { commentId }),
+          sort: 'created',
+          expand: 'author',
+          // Same collision as listComments: two threads opened in quick
+          // succession share the collection path, and the SDK would cancel the
+          // first thread's fetch — a thread opened before its replies landed
+          // showed none of them.
+          requestKey: `c11n:replies:${commentId}`,
+        }),
+      )
       return records.map(mapReply)
     },
 
@@ -181,13 +292,15 @@ export function createPocketBaseBackend(baseUrl = '/__c11n/pb'): C11nBackend {
       const me = requireAuth()
       // Same reason as createComment: keep the display name on the record the
       // caller upserts over the (unexpanded) realtime echo.
-      const rec = await pb.collection('replies').create(
-        {
-          comment: commentId,
-          body,
-          author: me.id,
-        },
-        { expand: 'author' },
+      const rec = await guard(() =>
+        pb.collection('replies').create(
+          {
+            comment: commentId,
+            body,
+            author: me.id,
+          },
+          { expand: 'author' },
+        ),
       )
       return mapReply(rec)
     },

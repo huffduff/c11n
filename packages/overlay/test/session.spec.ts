@@ -1,19 +1,30 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { createPinia, setActivePinia } from 'pinia'
+
+// The store navigates on a 401; jsdom cannot navigate, so the redirect is
+// asserted through this mock rather than by observing location.
+vi.mock('../src/lib/signin', () => ({
+  signInUrl: (reason: string, next?: string) =>
+    `/__c11n/auth/?reason=${reason}${next ? `&next=${encodeURIComponent(next)}` : ''}`,
+  goToSignIn: vi.fn(),
+}))
+
+import { goToSignIn } from '../src/lib/signin'
 import { setBackend } from '../src/lib/backend'
 import type { C11nBackend, Me } from '../src/lib/api'
 import { useSessionStore } from '../src/stores/session'
 
-const tom: Me = { id: 'u1', email: 'tom@hfdf.io', name: 'Tom' }
+const tom: Me = { id: 'u1', email: 'tom@hfdf.io', name: 'Tom', role: 'team' }
 
 function makeMockBackend(overrides: Partial<C11nBackend> = {}): C11nBackend {
   return {
-    login: vi.fn().mockResolvedValue(tom),
-    logout: vi.fn(),
-    me: vi.fn().mockReturnValue(null),
+    me: vi.fn().mockResolvedValue(null),
+    logout: vi.fn().mockResolvedValue(undefined),
+    invite: vi.fn(),
     listComments: vi.fn().mockResolvedValue([]),
     createComment: vi.fn(),
     setResolved: vi.fn().mockResolvedValue(undefined),
+    deleteComment: vi.fn().mockResolvedValue(undefined),
     listReplies: vi.fn().mockResolvedValue([]),
     createReply: vi.fn(),
     subscribe: vi.fn().mockReturnValue(() => {}),
@@ -24,9 +35,10 @@ function makeMockBackend(overrides: Partial<C11nBackend> = {}): C11nBackend {
 describe('useSessionStore', () => {
   beforeEach(() => {
     setActivePinia(createPinia())
+    vi.mocked(goToSignIn).mockClear()
   })
 
-  it('starts logged out', () => {
+  it('starts signed out', () => {
     setBackend(makeMockBackend())
     const store = useSessionStore()
     expect(store.me).toBeNull()
@@ -35,92 +47,65 @@ describe('useSessionStore', () => {
     expect(store.error).toBeNull()
   })
 
-  it('init() restores a persisted session from backend.me()', () => {
-    setBackend(makeMockBackend({ me: vi.fn().mockReturnValue(tom) }))
+  it('init() asks the proxy who the cookie belongs to', async () => {
+    setBackend(makeMockBackend({ me: vi.fn().mockResolvedValue(tom) }))
     const store = useSessionStore()
-    store.init()
+
+    await store.init()
+
     expect(store.me).toEqual(tom)
     expect(store.isAuthed).toBe(true)
-  })
-
-  it('init() leaves me null when nothing is persisted', () => {
-    setBackend(makeMockBackend())
-    const store = useSessionStore()
-    store.init()
-    expect(store.me).toBeNull()
-    expect(store.isAuthed).toBe(false)
-  })
-
-  it('login() success sets me and clears a previous error', async () => {
-    const mock = makeMockBackend()
-    setBackend(mock)
-    const store = useSessionStore()
-    store.error = 'Invalid email or password'
-
-    await store.login('tom@hfdf.io', 'hunter2')
-
-    expect(mock.login).toHaveBeenCalledWith('tom@hfdf.io', 'hunter2')
-    expect(store.me).toEqual(tom)
-    expect(store.isAuthed).toBe(true)
-    expect(store.error).toBeNull()
     expect(store.loading).toBe(false)
+    expect(goToSignIn).not.toHaveBeenCalled()
   })
 
-  it('login() sets loading while in flight', async () => {
-    let resolveLogin!: (m: Me) => void
-    const mock = makeMockBackend({
-      login: vi.fn().mockReturnValue(new Promise<Me>((res) => (resolveLogin = res))),
-    })
-    setBackend(mock)
+  it('init() sends a 401 (expired cookie) to the sign-in page', async () => {
+    setBackend(makeMockBackend({ me: vi.fn().mockResolvedValue(null) }))
     const store = useSessionStore()
 
-    const p = store.login('tom@hfdf.io', 'hunter2')
-    expect(store.loading).toBe(true)
-    resolveLogin(tom)
-    await p
-    expect(store.loading).toBe(false)
-  })
+    await store.init()
 
-  it('login() failure with status 400 sets a friendly error, me stays null', async () => {
-    const mock = makeMockBackend({
-      login: vi.fn().mockRejectedValue({ status: 400 }),
-    })
-    setBackend(mock)
-    const store = useSessionStore()
-
-    await store.login('tom@hfdf.io', 'wrong')
-
-    expect(store.error).toBe('Invalid email or password')
     expect(store.me).toBeNull()
     expect(store.isAuthed).toBe(false)
     expect(store.loading).toBe(false)
+    expect(goToSignIn).toHaveBeenCalledWith('expired')
   })
 
-  it('login() failure with any other error sets a generic message', async () => {
-    const mock = makeMockBackend({
-      login: vi.fn().mockRejectedValue(new Error('network down')),
-    })
-    setBackend(mock)
+  it('init() does not redirect on a network failure (it is not "signed out")', async () => {
+    setBackend(makeMockBackend({ me: vi.fn().mockRejectedValue(new Error('offline')) }))
     const store = useSessionStore()
 
-    await store.login('tom@hfdf.io', 'hunter2')
+    await store.init()
 
-    expect(store.error).toBe('Sign-in failed, please try again')
     expect(store.me).toBeNull()
     expect(store.loading).toBe(false)
+    expect(goToSignIn).not.toHaveBeenCalled()
   })
 
-  it('logout() calls backend.logout and clears me', async () => {
-    const mock = makeMockBackend()
+  it('logout() awaits the backend and drops the local session', async () => {
+    const mock = makeMockBackend({ me: vi.fn().mockResolvedValue(tom) })
     setBackend(mock)
     const store = useSessionStore()
-    await store.login('tom@hfdf.io', 'hunter2')
+    await store.init()
     expect(store.me).toEqual(tom)
 
-    store.logout()
+    await store.logout()
 
     expect(mock.logout).toHaveBeenCalled()
     expect(store.me).toBeNull()
     expect(store.isAuthed).toBe(false)
+  })
+
+  it('logout() drops the local session even when clearing the cookie throws', async () => {
+    const mock = makeMockBackend({
+      me: vi.fn().mockResolvedValue(tom),
+      logout: vi.fn().mockRejectedValue(new Error('network')),
+    })
+    setBackend(mock)
+    const store = useSessionStore()
+    await store.init()
+
+    await expect(store.logout()).rejects.toThrow('network')
+    expect(store.me).toBeNull()
   })
 })

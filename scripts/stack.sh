@@ -357,6 +357,18 @@ cmd_up() {
 		head -c 24 /dev/urandom | od -An -tx1 | tr -d ' \n')"
 	[ -n "$pw" ] || die "could not generate a superuser password"
 
+	# Phase 3 identity (ADR 0006). `pb_hooks/bootstrap.pb.js` creates the first
+	# owner when the users collection has none, and prints a single-use invite
+	# link. The link lands in $STATE_DIR/pocketbase.log, which is where
+	# e2e/fixtures.ts (bootstrapInviteLink) reads it from — proving an operator
+	# can find it the same way. Both values can be overridden from the caller's
+	# environment; they are exported here so the hook, which runs inside BOTH
+	# children below (the upsert CLI boots the app with this hooks dir, then
+	# serve), sees them. The hook is a no-op once an owner exists, so re-running
+	# `up` on an existing pb_data does not mint a second owner or link.
+	export C11N_OWNER_EMAIL="${C11N_OWNER_EMAIL-owner@c11n.test}"
+	export C11N_PUBLIC_URL="${C11N_PUBLIC_URL-http://127.0.0.1:$CADDY_PORT}"
+
 	# Bootstrap before serve: the CLI applies migrations and writes the
 	# superuser while it holds the database exclusively. Doing it against a
 	# running serve hits the same SQLite file from a second process.
@@ -403,6 +415,7 @@ cmd_up() {
 		export C11N_LISTEN=":$CADDY_PORT"
 		export C11N_PB_ADDR="127.0.0.1:$PB_PORT"
 		export C11N_OVERLAY_DIR="$REPO_ROOT/packages/overlay/dist"
+		export C11N_SIGNIN_DIR="$REPO_ROOT/packages/signin"
 		export C11N_UPSTREAM="http://127.0.0.1:$UPSTREAM_PORT"
 		# Always "verify": the upstream is plain http (see the guard in up), and
 		# an empty value would make Caddy read it as set.
@@ -413,7 +426,10 @@ cmd_up() {
 			--config "$REPO_ROOT/deploy/Caddyfile" \
 			--adapter caddyfile
 	)
-	wait_for caddy "http://127.0.0.1:$CADDY_PORT/__c11n/pb/api/health"
+	# The sign-in page, not /__c11n/pb/api/health: everything but
+	# /__c11n/auth/* is behind the session gate (3.8), so a health check there
+	# would (correctly) answer 401 and this would never come up.
+	wait_for caddy "http://127.0.0.1:$CADDY_PORT/__c11n/auth/"
 
 	log "caddy:      http://127.0.0.1:$CADDY_PORT (overlay + proxied PocketBase)"
 	log "pocketbase: http://127.0.0.1:$PB_PORT (admin: /_/)"

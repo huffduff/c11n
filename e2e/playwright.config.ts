@@ -19,7 +19,11 @@ import { defineConfig } from '@playwright/test'
  * the specs assert on global row sets, so parallel workers would race each
  * other's fixtures.
  */
-const fixture = process.env.C11N_FIXTURE ?? 'vite'
+const fixture = process.env.C11N_FIXTURE ?? (process.env.C11N_E2E_EXTERNAL === '1' ? 'go' : 'vite')
+
+// In external mode the origin is whatever the operator points at (normally a
+// port-forward of the cluster's Service). The default is the native stack.
+const baseURL = (process.env.C11N_E2E_BASE_URL ?? 'http://127.0.0.1:18080').replace(/\/+$/, '')
 
 export default defineConfig({
   testDir: './specs',
@@ -40,7 +44,7 @@ export default defineConfig({
   projects: [{ name: fixture }],
   reporter: [['list'], ['html', { open: 'never' }]],
   use: {
-    baseURL: 'http://127.0.0.1:18080',
+    baseURL,
     actionTimeout: 10_000,
     navigationTimeout: 15_000,
     trace: 'retain-on-failure',

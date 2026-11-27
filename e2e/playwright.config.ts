@@ -5,13 +5,21 @@ import { defineConfig } from '@playwright/test'
  * `scripts/stack.sh` (native binaries, no Docker).
  *
  * Two topologies, one suite. C11N_FIXTURE selects the upstream the proxy sits
- * in front of, and the specs that only make sense for one of them skip
- * themselves:
- *   vite  demo-vue served by the vite dev server on :15173 (HMR, today's dev)
- *   go    the built demo-vue served by examples/demo-go-server on :15174
- *         (the production topology from ADR 0001)
+ * in front of:
+ *   vite   demo-vue served by the vite dev server on :15173 (HMR, today's dev)
+ *   go     the built demo-vue served by examples/demo-go-server on :15174
+ *          (the production topology from ADR 0001)
+ *   sasser the real dogfood app — sasser-studios frontend/ via vite dev on
+ *          :15175, HTTPS (ADR 0009). Only specs/upstream-compat.spec.ts runs;
+ *          the demo specs assert on demo-vue's DOM.
  *
- * The two runs are separate invocations (`npm run e2e:vite`, `npm run e2e:go`)
+ * Selection is done here, not with test.skip, for the sasser run: the demo
+ * specs fail on their first locator against a different app, and rewriting a
+ * dozen files to skip themselves would be worse than one testMatch. The reverse
+ * direction is a describe-level skip inside upstream-compat.spec.ts, matching
+ * topology.spec.ts's existing pattern.
+ *
+ * Each run is a separate invocation (`npm run e2e:vite`, `e2e:go`, `e2e:sasser`)
  * because each needs its own fresh stack: globalSetup wipes PocketBase's data
  * and brings the stack up for the fixture in the environment.
  *
@@ -21,12 +29,19 @@ import { defineConfig } from '@playwright/test'
  */
 const fixture = process.env.C11N_FIXTURE ?? (process.env.C11N_E2E_EXTERNAL === '1' ? 'go' : 'vite')
 
+// The sasser run is the compatibility probe against the real client app: the
+// demo-only specs are not selected at all (see above).
+// Patterns are matched against the file path relative to testDir, so the
+// directory itself must not be repeated here.
+const testMatch = fixture === 'sasser' ? ['upstream-compat.spec.ts'] : ['**/*.spec.ts']
+
 // In external mode the origin is whatever the operator points at (normally a
 // port-forward of the cluster's Service). The default is the native stack.
 const baseURL = (process.env.C11N_E2E_BASE_URL ?? 'http://127.0.0.1:18080').replace(/\/+$/, '')
 
 export default defineConfig({
   testDir: './specs',
+  testMatch,
   globalSetup: './global-setup.ts',
   globalTeardown: './global-teardown.ts',
   // Whole-suite ceiling. `up` alone can take ~20 s on a cold cache (plus the

@@ -6,11 +6,15 @@
 #   upstream   :15173  (C11N_FIXTURE=vite, the default: demo-vue via vite dev)
 #              :15174  (C11N_FIXTURE=go: the built demo-vue served by
 #                       examples/demo-go-server, the production topology)
+#              :15175  (C11N_FIXTURE=sasser: the real dogfood app,
+#                       sasser-studios frontend/ via vite dev, HTTPS)
 #   caddy      :18080  (deploy/Caddyfile via C11N_* env overrides)
 #
-# The two fixtures exist because the dogfood app is served by Vite in dev and
-# by a Go backend in production (ADR 0001). The proxy has to be proven in front
-# of both, so the same suite runs twice, once per fixture, with a fresh stack.
+# The fixtures exist because the dogfood app is served by Vite in dev and by a
+# Go backend in production (ADR 0001, ADR 0009). The proxy has to be proven in
+# front of both, so the same generic suite runs twice, once per demo fixture,
+# and the sasser fixture runs the compatibility probe
+# (e2e/specs/upstream-compat.spec.ts) against the real client app.
 #
 # Binaries resolve through scripts/tools-lib.sh: $CADDY_BIN / $POCKETBASE_BIN
 # when set, else .tools/ (run scripts/fetch-tools.sh first).
@@ -36,21 +40,42 @@ PB_PORT=18090
 DEMO_PORT=15173
 # Keep in sync with GO_PORT in e2e/fixtures.ts (specs cannot read this file).
 GO_PORT=15174
+# Keep in sync with SASSER_PORT in e2e/fixtures.ts.
+SASSER_PORT=15175
 CADDY_PORT=18080
 FIXTURE="${C11N_FIXTURE:-vite}"
 case "$FIXTURE" in
-vite | go) ;;
+vite | go | sasser) ;;
 *)
-	printf "error: C11N_FIXTURE must be 'vite' or 'go' (got '%s')\n" "$FIXTURE" >&2
+	printf "error: C11N_FIXTURE must be 'vite', 'go' or 'sasser' (got '%s')\n" "$FIXTURE" >&2
 	exit 1
 	;;
 esac
-# The port Caddy proxies to, and the port preflight must guard.
-if [ "$FIXTURE" = go ]; then
+# sasser's pinned commit and repo live with the other pins.
+# shellcheck source=scripts/tools.env
+. "$SCRIPT_DIR/tools.env"
+# The upstream the proxy talks to, its cert policy, and the port preflight
+# must guard.
+case "$FIXTURE" in
+go)
 	UPSTREAM_PORT="$GO_PORT"
-else
+	UPSTREAM_URL="http://127.0.0.1:$GO_PORT"
+	UPSTREAM_TLS="verify"
+	;;
+sasser)
+	UPSTREAM_PORT="$SASSER_PORT"
+	# Vite dev serves HTTPS with an @vitejs/plugin-basic-ssl self-signed cert
+	# (ADR 0009): the proxy cannot validate it, and this is the one fixture
+	# that is allowed to say "insecure".
+	UPSTREAM_URL="https://127.0.0.1:$SASSER_PORT"
+	UPSTREAM_TLS="insecure"
+	;;
+*)
 	UPSTREAM_PORT="$DEMO_PORT"
-fi
+	UPSTREAM_URL="http://127.0.0.1:$DEMO_PORT"
+	UPSTREAM_TLS="verify"
+	;;
+esac
 # The demo vite is the workspace's hoisted install: never `npx vite`, which
 # would silently download an unpinned copy when node_modules is missing.
 DEMO_DIR="$REPO_ROOT/examples/demo-vue"
@@ -104,7 +129,10 @@ service_markers() {
 	case "$1" in
 	pocketbase) printf '%s\n' 'pocketbase serve' ;;
 	caddy) printf '%s\n' 'caddy run' ;;
-	demo) printf '%s\n' "--port $DEMO_PORT" "$GO_BIN --addr 127.0.0.1:$GO_PORT" ;;
+	demo)
+		printf '%s\n' "--port $DEMO_PORT" "--port $SASSER_PORT" \
+			"$GO_BIN --addr 127.0.0.1:$GO_PORT"
+		;;
 	*) return 1 ;;
 	esac
 }
@@ -149,16 +177,17 @@ port_in_use() {
 # foreign listener would otherwise answer the health checks while our own
 # process died ("port in use"), and caddy would happily proxy it.
 #
-# Both fixture ports are checked whichever fixture was selected: switching
-# C11N_FIXTURE between runs is normal, and a stack left behind by the other
-# fixture still owns its upstream port.
+# Both demo fixture ports are checked whichever fixture was selected, plus the
+# sasser one: switching C11N_FIXTURE between runs is normal, and a stack left
+# behind by another fixture still owns its upstream port.
 preflight_ports() {
 	local port name busy=""
-	for port in "$PB_PORT" "$DEMO_PORT" "$GO_PORT" "$CADDY_PORT"; do
+	for port in "$PB_PORT" "$DEMO_PORT" "$GO_PORT" "$SASSER_PORT" "$CADDY_PORT"; do
 		case "$port" in
 		"$PB_PORT") name=pocketbase ;;
 		"$DEMO_PORT") name="demo upstream (vite fixture)" ;;
 		"$GO_PORT") name="demo upstream (go fixture)" ;;
+		"$SASSER_PORT") name="sasser upstream (sasser fixture)" ;;
 		*) name=caddy ;;
 		esac
 		if port_in_use "$port"; then
@@ -168,7 +197,7 @@ preflight_ports() {
 	done
 	if [ -n "$busy" ]; then
 		log "refusing to start: those ports belong to a process that is not this stack"
-		log "  inspect the owner with: ss -ltnp | grep -E ':($PB_PORT|$DEMO_PORT|$GO_PORT|$CADDY_PORT)\\b'"
+		log "  inspect the owner with: ss -ltnp | grep -E ':($PB_PORT|$DEMO_PORT|$GO_PORT|$SASSER_PORT|$CADDY_PORT)\\b'"
 		log "  or stop a previous stack with: scripts/stack.sh down"
 		exit 1
 	fi
@@ -218,6 +247,11 @@ start_service() {
 	log "$name: started (pid $pid, log $log_path)"
 }
 
+# Extra curl flags for the readiness polls: the sasser fixture's upstream is
+# HTTPS with a self-signed cert (ADR 0009), so its wait is `curl -k`. Empty for
+# the plain-http fixtures, so a cert problem on those is never masked.
+WAIT_CURL_FLAGS=()
+
 # wait_for <name> <url> [<url>...]: poll until every URL answers, bounded by
 # START_TIMEOUT seconds. On timeout, dump the service's log tail.
 #
@@ -239,7 +273,7 @@ wait_for() {
 		fi
 		ok=1
 		for url in "$@"; do
-			curl -fs -o /dev/null --max-time 2 "$url" 2>/dev/null || ok=0
+			curl -fs "${WAIT_CURL_FLAGS[@]}" -o /dev/null --max-time 2 "$url" 2>/dev/null || ok=0
 		done
 		[ "$ok" -eq 1 ] && return 0
 		if [ "$SECONDS" -ge "$deadline" ]; then
@@ -302,6 +336,194 @@ build_go_fixture() {
 	fi
 }
 
+# ---- sasser fixture (ADR 0009) ---------------------------------------------
+# The dogfood target is a PRIVATE repository, and the e2e stack must run on a
+# developer box and in CI without either of them owning a writable clone. So:
+#   - C11N_SASSER_DIR set: use that checkout, but only if its HEAD is exactly
+#     SASSER_REF. A dirty tree or a different commit is refused, because "the
+#     probe passed" has to mean the pinned commit passed; C11N_SASSER_ALLOW_DIRTY=1
+#     is the explicit opt-out for someone testing a local change.
+#   - otherwise: a shallow fetch of SASSER_REF into $STATE_DIR/sasser-studios,
+#     authenticated by SASSER_CHECKOUT_TOKEN when set (CI), never persisted.
+# Nothing in the sasser-studios tree is modified: node_modules (gitignored) is
+# the only thing written there, and the install stamp lives in $STATE_DIR.
+
+sasser_dir() { printf '%s' "${C11N_SASSER_DIR:-$STATE_DIR/sasser-studios}"; }
+
+sasser_frontend() { printf '%s/frontend' "$(sasser_dir)"; }
+
+# sasser_node_version: the node the vite dev server runs on.
+#
+# sasser's own .tool-versions pins node 25.7.0, which neither this box nor the
+# CI image installs, and their package.json engines allow 24. So the shim runs
+# on c11n's pinned node (24.19.0) via ASDF_NODEJS_VERSION, which overrides the
+# per-directory .tool-versions for asdf's nodejs plugin. Their .tool-versions
+# is never edited.
+sasser_node_version() {
+	local v="${C11N_SASSER_NODE_VERSION:-}"
+	if [ -z "$v" ]; then
+		v="$(awk '$1 == "nodejs" { print $2; exit }' "$REPO_ROOT/.tool-versions" 2>/dev/null || true)"
+	fi
+	[ -n "$v" ] || die "could not determine a node version for the sasser fixture (set C11N_SASSER_NODE_VERSION)"
+	printf '%s' "$v"
+}
+
+# fetch_sasser <dir> <plain-url>: fetch exactly SASSER_REF, one commit deep.
+#
+# The token, when present, goes on the command line only: `origin` keeps the
+# credential-free URL, so nothing is written into the checkout's .git/config
+# and `git remote -v` / a copied checkout cannot leak it. (argv is visible to
+# the same user via ps; that is the accepted tradeoff for not persisting it.)
+fetch_sasser() {
+	local dir="$1" plain="$2" auth
+	auth="$plain"
+	if [ -n "${SASSER_CHECKOUT_TOKEN:-}" ]; then
+		auth="https://x-access-token:${SASSER_CHECKOUT_TOKEN}@github.com/${SASSER_REPO}.git"
+	fi
+	if ! git -C "$dir" fetch -q --depth 1 --no-tags "$auth" "$SASSER_REF" \
+		>>"$(log_file sasser-checkout)" 2>&1; then
+		log "---- $(log_file sasser-checkout) (tail) ----"
+		tail -n 20 "$(log_file sasser-checkout)" >&2 || true
+		die "git fetch of $SASSER_REPO@$SASSER_REF failed (private repo: set SASSER_CHECKOUT_TOKEN, or C11N_SASSER_DIR to a local checkout)"
+	fi
+}
+
+ensure_sasser_checkout() {
+	local dir url head
+	: "${SASSER_REPO:?SASSER_REPO is not set in scripts/tools.env}"
+	: "${SASSER_REF:?SASSER_REF is not set in scripts/tools.env}"
+	dir="$(sasser_dir)"
+
+	if [ -n "${C11N_SASSER_DIR:-}" ]; then
+		[ -d "$dir/.git" ] || die "C11N_SASSER_DIR=$dir is not a git checkout"
+		head="$(git -C "$dir" rev-parse HEAD 2>/dev/null || true)"
+		if [ "$head" != "$SASSER_REF" ]; then
+			if [ "${C11N_SASSER_ALLOW_DIRTY:-0}" = 1 ]; then
+				log "warning: sasser checkout HEAD ${head:0:12} != SASSER_REF ${SASSER_REF:0:12} (C11N_SASSER_ALLOW_DIRTY=1)"
+			else
+				die "C11N_SASSER_DIR=$dir is at ${head:0:12} (${head:-no HEAD}), but SASSER_REF is ${SASSER_REF:0:12}. Check out the pin (git -C $dir checkout --detach $SASSER_REF), or set C11N_SASSER_ALLOW_DIRTY=1 to run against that tree anyway."
+			fi
+		fi
+		log "sasser: using C11N_SASSER_DIR=$dir @ ${head:0:12}"
+		return 0
+	fi
+
+	url="https://github.com/${SASSER_REPO}.git"
+	if [ -d "$dir/.git" ] && git -C "$dir" rev-parse --verify -q "$SASSER_REF^{commit}" >/dev/null; then
+		log "sasser: reusing $dir @ ${SASSER_REF:0:12}"
+	else
+		log "sasser: cloning $SASSER_REPO @ ${SASSER_REF:0:12} into $dir"
+		rm -rf "$dir"
+		mkdir -p "$dir"
+		git -C "$dir" init -q
+		git -C "$dir" remote add origin "$url"
+		fetch_sasser "$dir" "$url"
+		if ! git -C "$dir" checkout -q --detach "$SASSER_REF" >>"$(log_file sasser-checkout)" 2>&1; then
+			die "checking out $SASSER_REF in $dir failed (see $(log_file sasser-checkout))"
+		fi
+	fi
+	head="$(git -C "$dir" rev-parse HEAD)"
+	[ "$head" = "$SASSER_REF" ] ||
+		die "sasser checkout at $dir is at $head, expected $SASSER_REF"
+}
+
+# sasser_install_deps: install the app's dependencies, but only when they are
+# missing or the manifests changed since the last install, so a no-op suite run
+# does not pay for (or churn) a full install.
+#
+# Two quirks of the pinned commit decide the recipe:
+#   - frontend/ is an npm WORKSPACE of the repo root (`workspaces: ["frontend"]`,
+#     ADR 0009's checkout), so npm installs from the root and hoists
+#     node_modules/: the vite binary lives in <root>/node_modules/.bin, and
+#     running npm inside frontend/ makes npm walk up and install the root
+#     project anyway.
+#   - the pin commits no package-lock.json (their CI references one, but it is
+#     not in the tree), and a lock-less `npm install` fails with ERESOLVE on
+#     @typescript-eslint's typescript peer. Hence npm ci when a lockfile is
+#     present (an existing checkout may have one), else
+#     `npm install --no-package-lock --legacy-peer-deps`.
+#     --no-package-lock is required: without it npm WRITES a package-lock.json
+#     into the client checkout, and "no file in sasser-studios is modified" is
+#     the whole point of the dogfood.
+#
+# The stamp is `<root path> <sha256 of root+frontend package.json>` in
+# $STATE_DIR, NOT inside the checkout.
+sasser_install_deps() {
+	local root frontend stamp want log_path install_desc
+	root="$(sasser_dir)"
+	frontend="$(sasser_frontend)"
+	stamp="$STATE_DIR/sasser-npm-ci.stamp"
+	[ -f "$root/package.json" ] && [ -f "$frontend/package.json" ] ||
+		die "the sasser checkout at $root has no package.json + frontend/package.json; C11N_SASSER_DIR must point at the repo root"
+	want="$root $(cat "$root/package.json" "$frontend/package.json" | sha256sum | cut -d' ' -f1)"
+	if [ -f "$root/package-lock.json" ]; then
+		install_desc="npm ci"
+	else
+		install_desc="npm install --no-package-lock --legacy-peer-deps (the pin commits no package-lock.json)"
+	fi
+	if [ -f "$stamp" ] && [ "$(cat "$stamp")" = "$want" ] && [ -x "$(sasser_vite_bin)" ]; then
+		log "sasser: node_modules matches the manifests (skipping install)"
+		return 0
+	fi
+	command -v npm >/dev/null 2>&1 || die "npm is required for C11N_FIXTURE=sasser"
+	log_path="$(log_file sasser-install)"
+	log "sasser: $install_desc in $root (node $(sasser_node_version))"
+	if [ -f "$root/package-lock.json" ]; then
+		(cd "$root" && ASDF_NODEJS_VERSION="$(sasser_node_version)" \
+			npm ci --no-audit --no-fund) >>"$log_path" 2>&1 || {
+			log "---- $log_path (tail) ----"
+			tail -n 40 "$log_path" >&2 || true
+			die "npm ci in $root failed"
+		}
+	else
+		(cd "$root" && ASDF_NODEJS_VERSION="$(sasser_node_version)" \
+			npm install --no-package-lock --legacy-peer-deps --no-audit --no-fund) \
+			>>"$log_path" 2>&1 || {
+			log "---- $log_path (tail) ----"
+			tail -n 40 "$log_path" >&2 || true
+			die "installing $root/node_modules failed"
+		}
+	fi
+	printf '%s\n' "$want" >"$stamp"
+}
+
+# sasser_vite_bin: the workspace-hoisted vite, falling back to a nested install
+# if a checkout was ever installed per-package.
+sasser_vite_bin() {
+	local root frontend
+	root="$(sasser_dir)"
+	frontend="$(sasser_frontend)"
+	if [ -x "$root/node_modules/.bin/vite" ]; then
+		printf '%s' "$root/node_modules/.bin/vite"
+	else
+		printf '%s' "$frontend/node_modules/.bin/vite"
+	fi
+}
+
+# start_sasser_upstream: vite dev on 127.0.0.1:$SASSER_PORT, HTTPS, HMR on.
+#
+# The binary is the checkout's own node_modules/.bin/vite, not `npx vite`: npx
+# would download an unpinned copy, and the marker check in `down` needs a real
+# vite process. `env` carries the node override; it execs, so the pid of the
+# session/group leader is still the vite process (the same reason the go
+# fixture runs a built binary instead of `go run`).
+start_sasser_upstream() {
+	local frontend vite_bin node_version
+	frontend="$(sasser_frontend)"
+	vite_bin="$(sasser_vite_bin)"
+	[ -x "$vite_bin" ] || die "$vite_bin is missing after the dependency install"
+	node_version="$(sasser_node_version)"
+	# cwd is frontend/ (vite.config.ts lives there); the binary is the
+	# workspace-hoisted one, so no `npx` and no download of an unpinned vite.
+	(
+		cd "$frontend"
+		start_service demo env \
+			ASDF_NODEJS_VERSION="$node_version" \
+			"$vite_bin" \
+			--mode development --host 127.0.0.1 --port "$SASSER_PORT" --strictPort
+	)
+}
+
 cmd_up() {
 	local svc pid pw pb caddy running
 	running="$(running_services | tr '\n' ' ')"
@@ -316,28 +538,46 @@ cmd_up() {
 	command -v setsid >/dev/null 2>&1 ||
 		die "setsid is required (util-linux): each service must run in its own process group so 'down' can stop its whole tree"
 
-	# The local stack's upstream is always plain http, so verifying TLS is the
-	# only meaningful setting. An ambient C11N_UPSTREAM_TLS would either be
-	# silently ignored or (as "insecure") misdescribe the stack; refuse instead.
-	case "${C11N_UPSTREAM_TLS:-verify}" in
-	"" | verify) ;;
-	*)
-		die "C11N_UPSTREAM_TLS=${C11N_UPSTREAM_TLS} does not apply to the local stack: its upstream is http://127.0.0.1:$UPSTREAM_PORT (plain http, no TLS). Unset it, or set C11N_UPSTREAM_TLS=verify."
-		;;
-	esac
+	# The local stack's upstream TLS is decided by the fixture: plain http for
+	# the demo fixtures (so "verify" is the only meaningful setting and an
+	# ambient C11N_UPSTREAM_TLS=insecure would misdescribe the stack), and a
+	# self-signed HTTPS vite for sasser (so "insecure" is the only one that can
+	# work). Refuse a value that cannot describe the fixture in use, rather than
+	# silently ignoring it.
+	if [ "$FIXTURE" = sasser ]; then
+		case "${C11N_UPSTREAM_TLS:-insecure}" in
+		insecure) ;;
+		*)
+			die "C11N_UPSTREAM_TLS=${C11N_UPSTREAM_TLS} does not apply to C11N_FIXTURE=sasser: its upstream is https://127.0.0.1:$SASSER_PORT with the vite dev server's self-signed cert (@vitejs/plugin-basic-ssl), so only 'insecure' can work. Unset it, or set C11N_UPSTREAM_TLS=insecure."
+			;;
+		esac
+	else
+		case "${C11N_UPSTREAM_TLS:-verify}" in
+		"" | verify) ;;
+		*)
+			die "C11N_UPSTREAM_TLS=${C11N_UPSTREAM_TLS} does not apply to the local stack: its upstream is $UPSTREAM_URL (plain http, no TLS). Unset it, or set C11N_UPSTREAM_TLS=verify."
+			;;
+		esac
+	fi
 
-	[ -x "$VITE_BIN" ] ||
-		die "$VITE_BIN is missing; run 'npm ci' at the repo root (the demo must not fetch its own vite)"
+	if [ "$FIXTURE" != sasser ]; then
+		[ -x "$VITE_BIN" ] ||
+			die "$VITE_BIN is missing; run 'npm ci' at the repo root (the demo must not fetch its own vite)"
+	fi
 
 	[ -f "$REPO_ROOT/packages/overlay/dist/overlay.js" ] ||
 		die "packages/overlay/dist/overlay.js is missing; run 'npm run build' at the repo root"
 
-	# Fail fast: the go fixture's build is the slowest and most failure-prone
-	# step of `up`, so it runs before anything is started (and before the EXIT
-	# trap can have a service to clean up).
+	# Fail fast: the go fixture's build and the sasser checkout + npm ci are the
+	# slowest and most failure-prone steps of `up`, so they run before anything
+	# is started (and before the EXIT trap can have a service to clean up).
 	if [ "$FIXTURE" = go ]; then
 		mkdir -p "$STATE_DIR"
 		build_go_fixture
+	elif [ "$FIXTURE" = sasser ]; then
+		mkdir -p "$STATE_DIR"
+		ensure_sasser_checkout
+		sasser_install_deps
 	fi
 
 	C11N_UP_OK=0
@@ -403,23 +643,30 @@ cmd_up() {
 		start_service demo "$GO_BIN" \
 			--addr "127.0.0.1:$GO_PORT" \
 			--dir "$DEMO_DIR/dist"
+	elif [ "$FIXTURE" = sasser ]; then
+		start_sasser_upstream
 	else
 		(
 			cd "$DEMO_DIR"
 			start_service demo "$VITE_BIN" --host 127.0.0.1 --port "$DEMO_PORT" --strictPort
 		)
 	fi
-	wait_for demo "http://127.0.0.1:$UPSTREAM_PORT/"
+	# sasser's dev server is HTTPS with a self-signed cert; -k is scoped to this
+	# one readiness poll (see WAIT_CURL_FLAGS).
+	if [ "$FIXTURE" = sasser ]; then
+		WAIT_CURL_FLAGS=(-k)
+	fi
+	wait_for demo "$UPSTREAM_URL/"
 
 	(
 		export C11N_LISTEN=":$CADDY_PORT"
 		export C11N_PB_ADDR="127.0.0.1:$PB_PORT"
 		export C11N_OVERLAY_DIR="$REPO_ROOT/packages/overlay/dist"
 		export C11N_SIGNIN_DIR="$REPO_ROOT/packages/signin"
-		export C11N_UPSTREAM="http://127.0.0.1:$UPSTREAM_PORT"
-		# Always "verify": the upstream is plain http (see the guard in up), and
-		# an empty value would make Caddy read it as set.
-		export C11N_UPSTREAM_TLS="verify"
+		export C11N_UPSTREAM="$UPSTREAM_URL"
+		# verify for the plain-http demo fixtures; "insecure" only for sasser's
+		# self-signed vite dev cert (ADR 0009), set above from the fixture.
+		export C11N_UPSTREAM_TLS="$UPSTREAM_TLS"
 		export XDG_DATA_HOME="$STATE_DIR/caddy/data"
 		export XDG_CONFIG_HOME="$STATE_DIR/caddy/config"
 		start_service caddy "$caddy" run \
@@ -433,7 +680,7 @@ cmd_up() {
 
 	log "caddy:      http://127.0.0.1:$CADDY_PORT (overlay + proxied PocketBase)"
 	log "pocketbase: http://127.0.0.1:$PB_PORT (admin: /_/)"
-	log "upstream:   http://127.0.0.1:$UPSTREAM_PORT ($FIXTURE fixture)"
+	log "upstream:   $UPSTREAM_URL ($FIXTURE fixture, TLS $UPSTREAM_TLS)"
 	log "credentials: $STATE_DIR/creds.json (superuser $ADMIN_EMAIL)"
 	C11N_UP_OK=1
 	trap - EXIT

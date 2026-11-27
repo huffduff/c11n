@@ -288,17 +288,18 @@ jobs:
           umask 077
           printf '%s\n' "$SASSER_DEPLOY_KEY" > "$key"
           printf '%s\n' 'github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl' > "$known_hosts"
-          export GIT_SSH_COMMAND="ssh -i $key -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=$known_hosts"
-          # TEMP-DIAG: what does ssh itself say? (public key material only)
-          echo "::group::ssh probe"
-          ssh -v -T -o BatchMode=yes -i "$key" -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$known_hosts" git@github.com 2>&1 | grep -vE 'debug1: (Reading|kex|SSH2|Local|Remote|compat|Sending|Entering|expecting|Authentications|Next|SSH_MSG|channel|Requesting|Will|pledge|Authenticated|Offering|Server accepts|Connecting|Connection|identity file|load)' || true
-          echo "::endgroup::"
+          export GIT_SSH_COMMAND="ssh -i $key -o IdentitiesOnly=yes -o BatchMode=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=$known_hosts"
           rm -rf .stack-sasser
           mkdir -p .stack-sasser
           git -C .stack-sasser init -q
-          fetch_log="$RUNNER_TEMP/sasser-fetch.log"
-          if ! git -C .stack-sasser fetch --depth 1 --no-tags git@github.com/huffduff/sasser-studios.git "$SASSER_REF" 2>&1 | tee "$fetch_log"; then
-            echo "::error::git fetch of sasser-studios@$SASSER_REF failed (see the log above)"
+          # `ssh://` rather than the scp-like `git@github.com:owner/repo.git`:
+          # both mean the same thing, but the explicit scheme cannot be parsed as
+          # a local path by anything that inspects the URL, and it needs no
+          # special-casing to be read as "ssh, path /owner/repo.git".
+          sasser_url='ssh://git@github.com/huffduff/sasser-studios.git'
+          if ! git -C .stack-sasser fetch --depth 1 --no-tags "$sasser_url" "$SASSER_REF"; then
+            echo "::error::git fetch of sasser-studios@$SASSER_REF failed; retrying traced for diagnostics"
+            GIT_TRACE=1 git -C .stack-sasser fetch --depth 1 --no-tags "$sasser_url" "$SASSER_REF" 2>&1 | tail -n 40 || true
             exit 1
           fi
           git -C .stack-sasser checkout -q --detach FETCH_HEAD

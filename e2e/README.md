@@ -172,6 +172,31 @@ The `request` fixture shares one cookie jar across a spec file: use
 `isolatedRequest()` from `fixtures.ts` for the "anonymous gets 401" assertions,
 or they pass for the wrong reason after an earlier sign-in.
 
+## The compatibility probe (Phase 4)
+
+`specs/upstream-compat.spec.ts` is the only spec the `sasser` fixture runs. Per
+route (`/today`, `/schedule`, `/members`, `/members/<a mock user id>`,
+`/packages`) it asserts that the overlay is injected, that the proxy introduces
+no console error or `pageerror` the app does not already produce when the same
+route is loaded directly on the upstream (a second context with
+`ignoreHTTPSErrors`), that the URL stays on the review host after an in-app
+sidebar navigation, that no same-origin request fails, and that nothing
+navigates to Zitadel/`/login`/`/auth/callback` (app login is out of scope,
+ADR 0009). Once per run it also checks the vite HMR websocket through the proxy,
+a full comment round trip anchored to a member table row (pin, reload, storage),
+and that the overlay's shadow-DOM styles do not leak into the app's computed
+styles.
+
+Both error sets are printed for every route so a failure is diagnosable without
+a trace. The overlay's own realtime `EventSource` is aborted on every full page
+load, which Chromium reports as a failed request; only that URL and only
+`ERR_ABORTED` is excluded, and the number of established streams is printed
+next to the aborts.
+
+A real incompatibility found here is committed as `test.fail()` with the
+symptom and evidence, not fixed in the probe (Task 4.3 fixes proxies) and not
+weakened into a pass.
+
 ## Reading the results
 
 `--reporter=list` prints one line per spec. Three markers besides a plain pass:

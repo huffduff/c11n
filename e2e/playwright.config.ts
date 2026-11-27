@@ -5,14 +5,15 @@ import { fixtureName } from './fixtures'
  * Full-stack e2e: real PocketBase, the demo app and Caddy, all started from
  * `scripts/stack.sh` (native binaries, no Docker).
  *
- * Two topologies, one suite. C11N_FIXTURE selects the upstream the proxy sits
+ * Three topologies, one suite. C11N_FIXTURE selects the upstream the proxy sits
  * in front of:
  *   vite   demo-vue served by the vite dev server on :15173 (HMR, today's dev)
  *   go     the built demo-vue served by examples/demo-go-server on :15174
  *          (the production topology from ADR 0001)
  *   sasser the real dogfood app — sasser-studios frontend/ via vite dev on
  *          :15175, HTTPS (ADR 0009). Only specs/upstream-compat.spec.ts runs;
- *          the demo specs assert on demo-vue's DOM.
+ *          the demo specs assert on demo-vue's DOM. `go` is also the default
+ *          for an external target (C11N_E2E_EXTERNAL=1), see fixtureName().
  *
  * Selection is done here, not with test.skip, for the sasser run: the demo
  * specs fail on their first locator against a different app, and rewriting a
@@ -66,7 +67,13 @@ export default defineConfig({
     baseURL,
     actionTimeout: 10_000,
     navigationTimeout: 15_000,
-    trace: 'retain-on-failure',
+    // Traces/screenshots/videos of the sasser run would be recordings of a
+    // PRIVATE app's DOM (and of every request the probe made through it), so
+    // that fixture gets none of them: trace off, and the screenshot / video
+    // defaults ('off' and 'off' — nothing in this config enables them) are left
+    // in place. CI must never upload them either; the sasser job uploads
+    // `.stack/*.log` only. See the job comment in .github/workflows/ci.yml.
+    trace: fixture === 'sasser' ? 'off' : 'retain-on-failure',
     viewport: { width: 1280, height: 720 },
   },
 })

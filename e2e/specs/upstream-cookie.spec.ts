@@ -1,5 +1,5 @@
 import { expect, test } from '@playwright/test'
-import { createUser, readCreds, sessionCookie, signInAs } from '../fixtures'
+import { createUser, fixtureName, readCreds, sessionCookie, signInAs } from '../fixtures'
 
 /**
  * I-2 (security review): the reviewed upstream must never see or set the
@@ -22,7 +22,7 @@ import { createUser, readCreds, sessionCookie, signInAs } from '../fixtures'
  */
 
 test.skip(
-  (process.env.C11N_FIXTURE ?? 'vite') !== 'go',
+  fixtureName() !== 'go',
   'the /__echo fixture route exists only in the go fixture',
 )
 

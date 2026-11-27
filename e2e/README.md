@@ -70,7 +70,10 @@ npm run e2e:sasser
 - Without `C11N_SASSER_DIR` the clone is a plain `https` fetch: no token is
   handled, stored or logged by `stack.sh`, so the box's git credentials must
   already work for the private repo. On failure it says to set
-  `C11N_SASSER_DIR` or configure git credentials.
+  `C11N_SASSER_DIR` or configure git credentials. The same tracked-file rule
+  applies to `.stack/sasser-studios` when a previous run's clone is reused:
+  HEAD is verified first (and only then is the reuse logged), and a locally
+  edited tracked file is refused unless `C11N_SASSER_ALLOW_DIRTY=1`.
 - Dependencies are installed only when missing or when a manifest changed (the
   stamp, over `package.json`, `frontend/package.json` and `package-lock.json`,
   is in `.stack/`, never in the client checkout). `frontend/` is an npm
@@ -97,19 +100,34 @@ npm run e2e:sasser
 not a third value in the `e2e` matrix, so the deploy key never reaches the
 `vite` and `go` runners. In order:
 
-- a step reads `SASSER_REF` out of `scripts/tools.env` into a step output: the
-  sha is never duplicated in the workflow, so bumping the pin moves the
-  checkout and the fixture's HEAD assertion together;
+- a step reads `SASSER_REF` out of `scripts/tools.env` into a step output,
+  after checking it is a full 40-char lowercase sha (it goes on a `git`
+  command line): the sha is never duplicated in the workflow, so bumping the
+  pin moves the checkout and the fixture's HEAD assertion together;
 - a step exports `secrets.SASSER_DEPLOY_KEY` and publishes `has_key`, because a
   secret cannot be referenced from an `if:`. Every later step is gated on it;
-- `actions/checkout` checks `huffduff/sasser-studios` out at that sha with
-  `ssh-key` (read-only deploy key "c11n CI (read-only)", which only this job
-  reads) and `persist-credentials: false`, into `.stack-sasser/` — outside the
-  npm workspace patterns, gitignored, and not globbed by any test or check;
-- a step asserts that checkout's HEAD really is `SASSER_REF` and logs the
-  commit subject, so the run's log is evidence about the pin;
+- ONE `run:` step checks `huffduff/sasser-studios` out at that sha into
+  `.stack-sasser/` (outside the npm workspace patterns, gitignored, and not
+  globbed by any test or check), using the read-only deploy key
+  "c11n CI (read-only)". The key is `env:`-scoped to that step only, written
+  under `$RUNNER_TEMP` with `umask 077`, used for a single
+  `git fetch <url> <sha>`, and removed by an `EXIT` trap — so it is gone before
+  `npm ci`, the probe and every dependency's install script run, and it never
+  reaches a `.git/config` (no remote is added; the fetch is by URL).
+  Host-key checking is on against GitHub's published ed25519 key. This is
+  deliberately not `actions/checkout` with `ssh-key:`, which leaves the key on
+  disk until its post-job step;
+- a step asserts that checkout's HEAD really is `SASSER_REF`, that
+  `.git/config` carries no url/credential setting, and logs the commit subject,
+  so the run's log is evidence about the pin;
 - `C11N_SASSER_DIR` points at `.stack-sasser/`; `stack.sh` does the `npm ci`
   and the vite dev server as it does locally.
+
+That job uploads **no Playwright artifact** — a trace, screenshot or video of
+the private app's DOM is not something a public repo's actions may keep. The
+config sets `trace: 'off'` for this fixture (screenshots/videos are off by
+default), and the only failure artifact is `.stack/*.log`, the services' own
+logs, retained for a week.
 
 Without the secret (a `pull_request` from a fork) the job succeeds having done
 nothing: a `::notice::` and a job-summary line say the probe did not run, and

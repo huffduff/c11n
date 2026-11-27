@@ -1,5 +1,5 @@
 import { expect, test } from '@playwright/test'
-import { EXTERNAL, GO_PORT, createUser, sessionCookie, signInAs } from '../fixtures'
+import { EXTERNAL, GO_PORT, createUser, fixtureName, sessionCookie, signInAs } from '../fixtures'
 
 /**
  * Topology specs: the same proxy, two different upstreams.
@@ -11,7 +11,7 @@ import { EXTERNAL, GO_PORT, createUser, sessionCookie, signInAs } from '../fixtu
  * browser. The fixture-specific specs skip on the other run, so both
  * topologies report the whole suite with the same suite of markers.
  */
-const fixture = process.env.C11N_FIXTURE ?? 'vite'
+const fixture = fixtureName()
 const overlayTag = '/__c11n/overlay.js'
 const goUpstream = `http://127.0.0.1:${GO_PORT}`
 

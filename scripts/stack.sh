@@ -348,7 +348,10 @@ build_go_fixture() {
 #   - otherwise: a shallow fetch of SASSER_REF into $STATE_DIR/sasser-studios
 #     over plain https, authenticated by the caller's own git setup
 #     (`gh auth setup-git`, a credential helper). No token is ever handled,
-#     stored or echoed by this script.
+#     stored or echoed by this script. A clone left by an earlier run is reused
+#     only after the same checks as C11N_SASSER_DIR: HEAD verified against the
+#     pin, TRACKED files clean (untracked node_modules is fine, a locally
+#     edited tracked file is refused unless C11N_SASSER_ALLOW_DIRTY=1).
 # Nothing in the sasser-studios tree is modified: node_modules (gitignored) is
 # the only thing written there, and the install stamp lives in $STATE_DIR.
 
@@ -389,8 +392,40 @@ fetch_sasser() {
 	fi
 }
 
+# sasser_tracked_changes <dir>: porcelain for TRACKED files only.
+#
+# Untracked files are ignored on purpose: node_modules (gitignored) is written
+# into the checkout, and `npm ci` is what puts it there. This is the one
+# definition of "the tree the probe sees is the pinned tree"; both checkout
+# branches below go through it.
+sasser_tracked_changes() {
+	git -C "$1" status --porcelain --untracked-files=no 2>/dev/null || true
+}
+
+# sasser_check_tracked_clean <dir> <label>...
+#
+# Refuses a checkout with changes to tracked files, because "the probe passed"
+# has to mean the pinned commit passed. C11N_SASSER_ALLOW_DIRTY=1 downgrades the
+# refusal to a loud warning, for someone deliberately testing a local change.
+# <label> is what the caller calls the checkout in the message (for a
+# caller-supplied tree "C11N_SASSER_DIR=<dir>", for the managed clone "sasser
+# checkout at <dir>"), so each branch names the thing the operator can fix.
+sasser_check_tracked_clean() {
+	local dir="$1" label="$2" dirty
+	dirty="$(sasser_tracked_changes "$dir")"
+	[ -n "$dirty" ] || return 0
+	if [ "${C11N_SASSER_ALLOW_DIRTY:-0}" = 1 ]; then
+		log "WARNING: $label has uncommitted changes to tracked files; a pass is NOT evidence about the pin (C11N_SASSER_ALLOW_DIRTY=1):"
+		printf '%s\n' "$dirty" | sed 's/^/  /' >&2
+		return 0
+	fi
+	die "$label has uncommitted changes to tracked files:
+$(printf '%s\n' "$dirty" | sed 's/^/  /')
+The probe must run against a clean checkout of SASSER_REF. Commit or stash them (untracked files such as node_modules are fine), or set C11N_SASSER_ALLOW_DIRTY=1 to run against that tree anyway (a pass is then not evidence about the pin)."
+}
+
 ensure_sasser_checkout() {
-	local dir url head dirty
+	local dir url head reused=0
 	: "${SASSER_REPO:?SASSER_REPO is not set in scripts/tools.env}"
 	: "${SASSER_REF:?SASSER_REF is not set in scripts/tools.env}"
 	dir="$(sasser_dir)"
@@ -405,26 +440,14 @@ ensure_sasser_checkout() {
 				die "C11N_SASSER_DIR=$dir is at ${head:0:12} (${head:-no HEAD}), but SASSER_REF is ${SASSER_REF:0:12}. Check out the pin (git -C $dir checkout --detach $SASSER_REF), or set C11N_SASSER_ALLOW_DIRTY=1 to run against that tree anyway (a pass is then not evidence about the pin)."
 			fi
 		fi
-		# Tracked-file changes are refused for the same reason as a different
-		# HEAD; untracked files are ignored on purpose (node_modules lives there).
-		dirty="$(git -C "$dir" status --porcelain --untracked-files=no 2>/dev/null || true)"
-		if [ -n "$dirty" ]; then
-			if [ "${C11N_SASSER_ALLOW_DIRTY:-0}" = 1 ]; then
-				log "WARNING: sasser checkout $dir has uncommitted changes to tracked files; a pass is NOT evidence about the pin (C11N_SASSER_ALLOW_DIRTY=1):"
-				printf '%s\n' "$dirty" | sed 's/^/  /' >&2
-			else
-				die "C11N_SASSER_DIR=$dir has uncommitted changes to tracked files:
-$(printf '%s\n' "$dirty" | sed 's/^/  /')
-The probe must run against a clean checkout of SASSER_REF. Commit or stash them (untracked files such as node_modules are fine), or set C11N_SASSER_ALLOW_DIRTY=1 to run against that tree anyway (a pass is then not evidence about the pin)."
-			fi
-		fi
+		sasser_check_tracked_clean "$dir" "C11N_SASSER_DIR=$dir"
 		log "sasser: using C11N_SASSER_DIR=$dir @ ${head:0:12}"
 		return 0
 	fi
 
 	url="https://github.com/${SASSER_REPO}.git"
 	if [ -d "$dir/.git" ] && git -C "$dir" rev-parse --verify -q "$SASSER_REF^{commit}" >/dev/null; then
-		log "sasser: reusing $dir @ ${SASSER_REF:0:12}"
+		reused=1
 	else
 		log "sasser: cloning $SASSER_REPO @ ${SASSER_REF:0:12} into $dir"
 		rm -rf "$dir"
@@ -439,6 +462,17 @@ The probe must run against a clean checkout of SASSER_REF. Commit or stash them 
 	head="$(git -C "$dir" rev-parse HEAD)"
 	[ "$head" = "$SASSER_REF" ] ||
 		die "sasser checkout at $dir is at $head, expected $SASSER_REF"
+	# The script-managed clone gets the same rule as a caller-supplied tree: the
+	# REUSE path is a checkout a previous run (or a person) left behind, and a
+	# pass over a locally edited tree is not evidence about the pin either.
+	sasser_check_tracked_clean "$dir" "sasser checkout at $dir"
+	# Logged only now that HEAD is verified and the tree is clean: a "reusing"
+	# line printed before the check would be a claim the run had not tested yet.
+	if [ "$reused" = 1 ]; then
+		log "sasser: reusing $dir @ ${head:0:12}"
+	else
+		log "sasser: checked out ${head:0:12} in $dir"
+	fi
 }
 
 # sasser_install_deps: install the app's dependencies, but only when they are

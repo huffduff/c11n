@@ -113,14 +113,16 @@ function flatten(c: ErrorSet): string[] {
  *
  * The one thing that is NOT counted as a failure is an `ERR_ABORTED` on the
  * overlay's own EventSource (`/__c11n/pb/api/realtime`): the overlay holds one
- * long-lived stream, and every full page load (the sign-in landing, then each
- * `page.goto`) aborts the previous one. Chromium reports that as a failed
- * request, not as a response, so it would otherwise fail every route for a
- * reason that has nothing to do with the app or the proxy. It is only excused
- * for that URL and only for ERR_ABORTED — a 4xx/5xx on it, or any abort
- * anywhere else, still fails — and the count of established streams (status
- * 200) is logged next to the aborts so a stream that never connected cannot
- * hide behind this exclusion.
+ * long-lived stream per document, and every full page load (the sign-in
+ * landing, then each `page.goto`) aborts the previous one. Chromium reports
+ * that as a failed request, not as a response, so it would otherwise fail every
+ * route for a reason that has nothing to do with the app or the proxy. It is
+ * only excused for that URL and only for ERR_ABORTED — a 4xx/5xx on it, or any
+ * abort anywhere else, still fails.
+ *
+ * `realtimeStreams` counts ESTABLISHED streams (status 200), and the route
+ * tests assert the exact delta per document load (see the spec body): the
+ * exclusion above must not be able to cover a route that opened none.
  */
 const REALTIME_PATH = '/__c11n/pb/api/realtime'
 
@@ -217,8 +219,22 @@ test.describe('sasser upstream compatibility', () => {
       // direct side, so keeping it would compare unlike things.
       errors.clear()
 
+      // ...but the count of established SSE streams is cumulative, and the
+      // landing is an app page that opened one of its own. Wait for that stream
+      // and take it as the baseline, so the assertion below measures exactly the
+      // route's document load: an in-flight landing stream would otherwise
+      // abort unnoticed (baseline 0) or land after the route's own and break the
+      // delta in the other direction.
+      await expect
+        .poll(() => net.realtimeStreams, {
+          message: `overlay realtime stream on the sign-in landing before ${route.path}`,
+        })
+        .toBeGreaterThan(0)
+      const streamsBefore = net.realtimeStreams
+
       await page.goto(route.path)
       await expect(page.locator(route.ready).first()).toBeVisible()
+      console.log(`[compat ${route.path}] realtime streams at sign-in baseline: ${streamsBefore}`)
 
       // (a) the overlay is mounted on the real app's page
       await expect(page.locator('#c11n-root')).toBeAttached()
@@ -250,8 +266,12 @@ test.describe('sasser upstream compatibility', () => {
       // ...and after one in-app sidebar navigation (vue-router history push:
       // no server round trip is involved, which is the point). Its console
       // output is collected separately and compared against a direct load of
-      // the TARGET route, so it is neither blamed on nor excused by the route
-      // load above.
+      // the TARGET route PLUS the route load's own set above: errors the route
+      // load already produced (they are the app's, not the navigation's) are
+      // scrubbed from the nav set, and anything the navigation adds has to be
+      // something a direct load of the target also produces. So the nav is
+      // neither blamed for the earlier load's output nor allowed to hide behind
+      // it.
       errors.clear()
       const target = route.path === '/packages' ? 'Today' : 'Packages'
       const targetPath = route.path === '/packages' ? '/today' : '/packages'
@@ -276,16 +296,34 @@ test.describe('sasser upstream compatibility', () => {
       // traffic is same-origin too (/__c11n/…), so nothing is excluded beyond
       // the documented SSE abort above: a 4xx there would be a real finding.
       console.log(
-        `[compat ${route.path}] overlay realtime streams: ${net.realtimeStreams} established, ` +
+        `[compat ${route.path}] overlay realtime streams: ${net.realtimeStreams} established ` +
+          `(${streamsBefore} before this route's document load), ` +
           `${net.abortedSse.length} aborted by navigation`,
       )
-      // Every document load of the review host opens the overlay's EventSource
-      // (the sign-in landing, then page.goto), so by now at least one stream
-      // must have been ESTABLISHED (a 200). Asserted — not just printed — so
-      // the ERR_ABORTED exclusion above cannot hide a stream that never
-      // connected: a route where the SSE path is broken must fail here.
-      expect(net.realtimeStreams, `overlay realtime streams established on ${route.path}`).toBeGreaterThan(0)
+      // Exactly ONE new stream for the route's document load. Counted as a
+      // delta from the sign-in baseline instead of "> 0": the baseline already
+      // contains the landing page's stream, so a total of one is what a route
+      // that never connected looks like, and it must fail. Requiring the delta
+      // also keeps the ERR_ABORTED exclusion above from hiding anything — the
+      // exclusions are per-navigation bookkeeping, not evidence of a stream.
+      // (Polled: the EventSource's 200 can land a moment after the page renders.)
+      await expect
+        .poll(() => net.realtimeStreams, {
+          message: `overlay realtime streams established on ${route.path} (baseline ${streamsBefore})`,
+        })
+        .toBe(streamsBefore + 1)
       expect(net.failed, `failed same-origin requests on ${route.path}`).toEqual([])
+
+      // The sidebar click above is a client-side push, so the document (and with
+      // it the overlay's EventSource) is the same one: no new stream may have
+      // been opened. Asserted rather than assumed — a second one would mean the
+      // overlay re-subscribes on pushState, and a third on the next click, i.e. a
+      // stream per navigation, which is a leak. Checked after the delta above so
+      // a slow-but-correct route load is never reported as a navigation bug.
+      expect(
+        net.realtimeStreams,
+        `overlay realtime streams after the in-app navigation on ${route.path}`,
+      ).toBe(streamsBefore + 1)
 
       // (e) the app's login is out of scope (ADR 0009): nothing may navigate to
       // Zitadel, /login or /auth/callback.

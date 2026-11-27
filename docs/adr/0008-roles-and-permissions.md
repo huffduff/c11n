@@ -45,8 +45,17 @@ There is one `role` field on `users`, with these values:
 - `author`, `project` and `seq` are immutable after create. They are
   enforced in an `onRecordUpdateRequest` hook, not by blocklisting fields in
   rule strings.
-- Replies inherit visibility from their comment. Realtime subscriptions are
-  scoped by project.
+- There is **no per-project read scoping yet.** `comments.listRule` and
+  `viewRule` (and `replies`') only require `@request.auth.id != ""`, so any
+  authenticated user can read every comment and reply in the deployment, not
+  just the ones on a page or project they were given. The overlay's realtime
+  subscription sends a project filter that the server applies, but the filter
+  is *chosen by the client*, so it is a UI convenience, not an access control.
+  This is acceptable for now because ADR 0005 gives each reviewed site its own
+  deployment: the only accounts that exist are that project's stakeholders.
+  Phase 2 closes the write side (S2); the read side stays open until Phase 3
+  task 3.10 makes the list/view rules role- and project-aware, which closes S3
+  fully.
 
 ## Consequences
 

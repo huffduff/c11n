@@ -46,9 +46,9 @@ describe('trackElements', () => {
       ['a', a],
       ['b', b],
     ])
-    const stop = trackElements(() => targets, onUpdate)
-    cleanups.push(stop)
-    return stop
+    const tracker = trackElements(() => targets, onUpdate)
+    cleanups.push(tracker.stop)
+    return tracker
   }
 
   it('computes rects for all targets on the first frame after start', () => {
@@ -124,7 +124,7 @@ describe('trackElements', () => {
 
   it('cleanup removes listeners and disconnects the observer', async () => {
     const onUpdate = vi.fn()
-    const stop = track(onUpdate)
+    const { stop } = track(onUpdate)
     flushFrame()
     onUpdate.mockClear()
 
@@ -142,7 +142,7 @@ describe('trackElements', () => {
 
   it('a frame already scheduled at cleanup time does not fire onUpdate', () => {
     const onUpdate = vi.fn()
-    const stop = track(onUpdate)
+    const { stop } = track(onUpdate)
     // initial frame still pending
     stop()
     flushFrame()
@@ -183,5 +183,39 @@ describe('trackElements', () => {
     const causes: Set<string> = onUpdate.mock.calls[0][1]
     expect(causes.has('scroll')).toBe(true)
     expect(causes.has('mutation')).toBe(true)
+  })
+
+  // B3: a caller that re-resolves its target set (PinLayer after items load)
+  // must be able to force a recompute — no scroll or resize required.
+  it('refresh() recomputes the CURRENT targets on the next frame', () => {
+    const onUpdate = vi.fn()
+    let targets = new Map<string, Element>([['a', a]])
+    const tracker = trackElements(() => targets, onUpdate)
+    cleanups.push(tracker.stop)
+    flushFrame()
+    onUpdate.mockClear()
+
+    targets = new Map<string, Element>([['b', b]]) // re-resolved target set
+    tracker.refresh()
+    expect(onUpdate).not.toHaveBeenCalled() // still behind the rAF gate
+
+    flushFrame()
+    expect(onUpdate).toHaveBeenCalledTimes(1)
+    const rects: Map<string, DOMRect> = onUpdate.mock.calls[0][0]
+    expect([...rects.keys()]).toEqual(['b'])
+    expect(onUpdate.mock.calls[0][1]).toEqual(new Set(['mutation']))
+  })
+
+  it('refresh() after stop() is a no-op', () => {
+    const onUpdate = vi.fn()
+    const tracker = track(onUpdate)
+    flushFrame()
+    onUpdate.mockClear()
+
+    tracker.stop()
+    tracker.refresh()
+    flushFrame()
+
+    expect(onUpdate).not.toHaveBeenCalled()
   })
 })

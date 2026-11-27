@@ -18,6 +18,24 @@ export interface ResolvedPin {
 const EMPTY_META: AnchorMeta = { tag: '', text: '', rect: { x: 0, y: 0, width: 0, height: 0 } }
 
 /**
+ * How many realtime-deleted ids the store remembers. Only needs to outlive an
+ * in-flight create (seconds), so a small ring is enough; it must not grow for
+ * the life of a long session.
+ */
+const DELETED_IDS_LIMIT = 200
+
+/**
+ * Keep the display name across an upsert: `rec` is the fresher record, but
+ * realtime events and unexpanded create responses arrive without an author
+ * name while the record already in the store may have been backfilled from
+ * the session. Prefer the incoming name, fall back to the one we hold.
+ */
+function withAuthorName<T extends { authorName?: string }>(rec: T, prev?: T): T {
+  if (rec.authorName !== undefined) return rec
+  return prev ? { ...rec, authorName: prev.authorName } : rec
+}
+
+/**
  * Comments for the current page + the comment-mode state machine.
  *
  * Mode lifecycle: `off` → enterPickMode → `pick` → (element clicked)
@@ -59,6 +77,12 @@ export const useCommentsStore = defineStore('comments', {
     sidebarLoading: false,
     /** Realtime teardown fn; null when not subscribed (also the re-entry guard). */
     _unsubRealtime: null as (() => void) | null,
+    /**
+     * Ids we saw a realtime delete for, bounded (see rememberDeleted). A
+     * create's HTTP response can land after the delete echo of the same row;
+     * without this, the upsert resurrects a record that is gone server-side.
+     */
+    deletedIds: new Set<string>(),
   }),
 
   getters: {
@@ -144,7 +168,10 @@ export const useCommentsStore = defineStore('comments', {
           anchorMeta: this.pendingAnchor.meta,
           body,
         })
-        this.items.push(rec)
+        // Same identity as the realtime echo (B4): whichever lands second is
+        // an update, not a second record — two entries render two pins.
+        this.upsertFromRealtime(rec)
+        this.upsertSidebarComment(rec)
         this.pendingAnchor = null
         this.mode = 'off'
       } catch {
@@ -156,14 +183,44 @@ export const useCommentsStore = defineStore('comments', {
     },
 
     // Realtime hooks (wired by startRealtime, Task 12).
+    /**
+     * Record a realtime delete. Upserts skip these ids: the create's HTTP
+     * response can land after the delete echo of the same row, and upserting
+     * it blindly would render a comment (or reply) that no longer exists.
+     * Bounded — an in-flight create needs a few seconds of memory, not a log.
+     */
+    rememberDeleted(id: string) {
+      this.deletedIds.add(id)
+      while (this.deletedIds.size > DELETED_IDS_LIMIT) {
+        const oldest = this.deletedIds.values().next().value
+        if (oldest === undefined) break
+        this.deletedIds.delete(oldest)
+      }
+    },
+
+    /**
+     * Upsert by id. Realtime events carry no `expand.author`, but the store
+     * backfills our own records from the session; a later unexpanded record
+     * (e.g. a create response) must not erase that name — the UI would fall
+     * back to the literal "author".
+     */
     upsertFromRealtime(rec: CommentRec) {
+      if (this.deletedIds.has(rec.id)) return
       const i = this.items.findIndex((c) => c.id === rec.id)
       if (i === -1) this.items.push(rec)
-      else this.items[i] = rec
+      else this.items[i] = withAuthorName(rec, this.items[i])
     },
 
     removeFromRealtime(id: string) {
       this.items = this.items.filter((c) => c.id !== id)
+    },
+
+    /** Project-wide list: upsert by id, so echoes never duplicate a row. */
+    upsertSidebarComment(rec: CommentRec) {
+      if (this.deletedIds.has(rec.id)) return
+      const i = this.sidebarComments.findIndex((c) => c.id === rec.id)
+      if (i === -1) this.sidebarComments.push(rec)
+      else this.sidebarComments[i] = withAuthorName(rec, this.sidebarComments[i])
     },
 
     // ------------------------------------------------------------------
@@ -223,38 +280,36 @@ export const useCommentsStore = defineStore('comments', {
         return rec
       }
 
-      const upsertSidebar = (rec: CommentRec) => {
-        const i = this.sidebarComments.findIndex((c) => c.id === rec.id)
-        if (i === -1) this.sidebarComments.push(rec)
-        else this.sidebarComments[i] = rec
-      }
-
       const onCommentUpsert = (rec: CommentRec) => {
         const filled = backfill(rec)
         this.upsertFromRealtime(filled)
-        upsertSidebar(filled)
+        this.upsertSidebarComment(filled)
       }
 
       this._unsubRealtime = backend.subscribe(PROJECT, {
         onCommentCreate: onCommentUpsert,
         onCommentUpdate: onCommentUpsert,
         onCommentDelete: (rec) => {
+          this.rememberDeleted(rec.id)
           this.removeFromRealtime(rec.id)
           this.sidebarComments = this.sidebarComments.filter((c) => c.id !== rec.id)
         },
         onReplyCreate: (reply) => {
           const cached = this.replies.get(reply.comment)
           if (!cached) return // unknown thread — unscoped stream, ignore
-          // Dedupe: our own reply is already appended by addReply.
-          if (!cached.some((r) => r.id === reply.id)) cached.push(backfill(reply))
+          // Same upsert as addReply: whichever of echo/HTTP lands second is
+          // an update, so our own reply never renders twice.
+          this.upsertReply(reply.comment, backfill(reply))
         },
         onReplyUpdate: (reply) => {
           const cached = this.replies.get(reply.comment)
           if (!cached) return
-          const i = cached.findIndex((r) => r.id === reply.id)
-          if (i !== -1) cached[i] = backfill(reply)
+          this.upsertReply(reply.comment, backfill(reply))
         },
         onReplyDelete: (reply) => {
+          // Recorded before the cache check: an unknown thread must still
+          // remember the id, or a create response can add the deleted reply.
+          this.rememberDeleted(reply.id)
           const cached = this.replies.get(reply.comment)
           if (!cached) return
           this.replies.set(
@@ -331,14 +386,32 @@ export const useCommentsStore = defineStore('comments', {
       this.error = null
       try {
         const rec = await backend.createReply(commentId, body)
-        const cached = this.replies.get(commentId)
-        if (cached) cached.push(rec)
+        // Upsert, not append: the realtime echo of this reply may have landed
+        // first, and a push would render the same reply twice (B5). If a
+        // delete for it beat this response, don't resurrect it either.
+        if (this.deletedIds.has(rec.id)) return
+        if (this.replies.has(commentId)) this.upsertReply(commentId, rec)
         else this.replies.set(commentId, [rec])
       } catch {
         this.error = 'Could not save reply'
       } finally {
         this.loading = false
       }
+    },
+
+    /**
+     * Upsert one reply into a thread's cache, replacing the array so every
+     * consumer of `replies.get(id)` re-renders. Unknown threads stay unknown:
+     * the reply stream is project-unscoped, so only cached threads are patched.
+     */
+    upsertReply(commentId: string, reply: ReplyRec) {
+      if (!this.replies.has(commentId)) return
+      if (this.deletedIds.has(reply.id)) return
+      const next = [...this.replies.get(commentId)!]
+      const i = next.findIndex((r) => r.id === reply.id)
+      if (i === -1) next.push(reply)
+      else next[i] = withAuthorName(reply, next[i])
+      this.replies.set(commentId, next)
     },
 
     /** Mark resolved in place — PinLayer drops the pin reactively. */

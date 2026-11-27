@@ -71,19 +71,14 @@ resolution and would break.
 | `✘` | failed (expected for `test.fail()`) |
 | `-` | skipped (`test.fixme()`) |
 
-Current known-bug markers (each becomes a passing spec when its fix lands):
+Known-bug markers: none right now. The three Phase 2 overlay bugs are fixed and
+their specs are plain specs, run every time:
 
-- **B3 — `test.fixme`**: "a seeded comment renders its pin without scroll or
-  resize". Pins stay `display:none` until a scroll/resize; the failure races
-  the tracker's first rAF, so it reproduces about 5/10 under
-  `--repeat-each=10`. `test.fail()` would itself flake, hence `fixme`.
-- **B4 — `test.fail`**: "saving a comment renders exactly one pin". The
-  realtime create echoes back and the comment renders two pins, 10/10. This is
-  the only spec that is *expected to fail*; a green run shows it as `✘`.
-- **reply echo — `test.fixme`**: "a UI reply is rendered once". One stored reply
-  renders twice (1 row in the DB, 2 `.c11n-popover-reply-body` in the DOM),
-  10/10 in isolation but it depends on whether the realtime echo beats the HTTP
-  response, so `fixme` rather than `fail`.
+| bug | spec | fix |
+| --- | --- | --- |
+| B3 | "a seeded comment renders its pin without scroll or resize" | `trackElements` returns `{ stop, refresh }`; `PinLayer` calls `refresh()` when it re-resolves with an existing tracker, so pins get their rects on load |
+| B4 | "saving a comment renders exactly one pin" | `saveComment` upserts by id instead of pushing, so the realtime echo is an update, not a second record |
+| B5 | "a UI reply is rendered once" | `addReply` and the realtime reply handlers share one upsert, so one stored reply renders one body |
 
 B2 (the seq hook) is fixed and covered by normal specs, including
 `10 parallel creates get unique seqs 1..10`; that one is the regression guard

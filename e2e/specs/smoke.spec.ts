@@ -64,20 +64,26 @@ test.describe('proxy contract', () => {
 test.describe('Caddyfile env matrix', () => {
   function validate(env: Record<string, string>): void {
     const scratch = fs.mkdtempSync(path.join(repoRoot, '.stack', 'validate-'))
-    execFileSync(
-      caddyBin(),
-      ['validate', '--adapter', 'caddyfile', '--config', 'deploy/Caddyfile'],
-      {
-        cwd: repoRoot,
-        stdio: 'pipe',
-        env: {
-          ...process.env,
-          XDG_DATA_HOME: path.join(scratch, 'data'),
-          XDG_CONFIG_HOME: path.join(scratch, 'config'),
-          ...env,
+    try {
+      execFileSync(
+        caddyBin(),
+        ['validate', '--adapter', 'caddyfile', '--config', 'deploy/Caddyfile'],
+        {
+          cwd: repoRoot,
+          stdio: 'pipe',
+          env: {
+            ...process.env,
+            XDG_DATA_HOME: path.join(scratch, 'data'),
+            XDG_CONFIG_HOME: path.join(scratch, 'config'),
+            ...env,
+          },
         },
-      },
-    )
+      )
+    } finally {
+      // Caddy writes its app-data (autosave, instance id) under the XDG dirs;
+      // remove them here or every run leaves four dirs behind in .stack.
+      fs.rmSync(scratch, { recursive: true, force: true })
+    }
   }
 
   test('defaults (http upstream, tls verify)', () => {

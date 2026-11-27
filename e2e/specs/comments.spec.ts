@@ -15,18 +15,12 @@ import {
 /**
  * Core comment flow against the real stack.
  *
- * Specs marked `test.fail()` / `test.fixme()` describe the CORRECT behaviour
- * of a known open bug and stay visible until Phase 2 fixes it:
- *   - B3  (fixme, ~5/10 flaky): pins stay display:none until scroll/resize
- *   - B4  (fail, 10/10): a saved comment renders two pins (realtime echo)
- *   - reply echo (fixme, 10/10 in isolation): a UI reply renders twice
- * Each becomes a passing spec the moment its fix lands.
+ * All former known-bug markers are fixed: B3 (pins measured on load), B4
+ * (saved comment deduped against its realtime echo) and B5 (ditto for
+ * replies) are plain specs.
  *
  * Pins are `.c11n-pin` inside the overlay's open shadow root; Playwright's CSS
- * locators pierce it. B3 leaves pins with `display:none` until a scroll or
- * resize, so DOM-presence assertions (`toHaveCount`) are used wherever
- * visibility is not the subject — otherwise the bug would masquerade as
- * "there is no comment".
+ * locators pierce it.
  */
 
 const PASSWORD = 'password123456'
@@ -117,12 +111,7 @@ test.describe('B2 — comment creation', () => {
 })
 
 test.describe('B3 — pins visible on load', () => {
-  // B3: pins hidden until scroll/resize; see assessment.
-  // fixme: the failure is a race with the tracker's first rAF (a fast comment
-  // load lands before it, a slow one after), reproduced 5/10 under
-  // --repeat-each=10 — `test.fail()` would flake, so this stays skipped until
-  // Phase 2's recompute-on-target-change fix makes it deterministic.
-  test.fixme('a seeded comment renders its pin without scroll or resize', async ({ page }) => {
+  test('a seeded comment renders its pin without scroll or resize', async ({ page }) => {
     const user = await createUser(undefined, 'B3 Seeder')
     await seedComment({ author: user.id, path: '/', selector: '#hero-title', body: 'anchored' })
 
@@ -144,25 +133,59 @@ test.describe('B3 — pins visible on load', () => {
     expect(pinBox!.y).toBeLessThan(h1Box!.y + h1Box!.height)
     expect(pinBox!.y + pinBox!.height).toBeGreaterThan(h1Box!.y)
   })
+
+  // B3 mutation path: the pin's own DOM lives in the shadow root, so the
+  // light-DOM observer that drives the tracker never sees it. If the frame
+  // that re-resolved the anchors is not followed by one that measures the new
+  // target, the pin stays display:none forever — no scroll or resize needed to
+  // reproduce, and nothing else would rescue it.
+  test('a pin appears when its anchored element is injected after load', async ({ page }) => {
+    const user = await createUser(undefined, 'B3 Late')
+    await seedComment({ author: user.id, path: '/', selector: '#late-target', body: 'late anchor' })
+
+    await signedIn(page, user.email, user.name)
+    // The target does not exist: the comment is orphaned, no pin.
+    await page.waitForTimeout(1_000)
+    await expect(page.locator('.c11n-pin')).toHaveCount(0)
+
+    // Late render, as an SPA chunk finishing hydration would do.
+    await page.evaluate(() => {
+      const el = document.createElement('div')
+      el.id = 'late-target'
+      el.textContent = 'late target'
+      el.style.cssText = 'display:block;width:200px;height:40px;margin:40px 0'
+      document.body.appendChild(el)
+    })
+
+    // No scrolling, no resizing: the injection is the only event.
+    const pin = page.locator('.c11n-pin')
+    await expect(pin).toHaveCount(1, { timeout: 2_000 })
+    await expect(pin).toBeVisible({ timeout: 2_000 })
+  })
 })
 
 test.describe('B4 — one pin per saved comment', () => {
-  // B4: duplicate pin from realtime echo. Reproduced 10/10 under
-  // --repeat-each=10 (the pin count reaches 2 inside the 2 s poll window).
-  test.fail('saving a comment renders exactly one pin', async ({ page }) => {
+  test('saving a comment renders exactly one pin', async ({ page }) => {
     const user = await createUser(undefined, 'B4 Saver')
     await signedIn(page, user.email, user.name)
 
     await createViaUi(page, 'only once')
 
-    // Poll for the duplicate for 2 s: the realtime create can land before or
-    // after the HTTP response, so a single snapshot is not enough.
+    // Wait for the pin to exist, then make sure it never doubles: the realtime
+    // create can land before or after the HTTP response, so a single snapshot
+    // is not enough.
+    await expect(page.locator('.c11n-pin')).toHaveCount(1)
     const counts = new Set<number>()
     for (let i = 0; i < 20; i++) {
       counts.add(await page.locator('.c11n-pin').count())
       await page.waitForTimeout(100)
     }
     expect([...counts].sort()).toEqual([1])
+
+    // The saved comment's author name survives whichever of the realtime echo
+    // and the HTTP response landed second — neither may blank it to "author".
+    await page.locator('.c11n-pin').click()
+    await expect(page.locator('.c11n-popover-author')).toContainText(user.name)
   })
 })
 
@@ -183,7 +206,6 @@ test.describe('realtime', () => {
 
       await createViaUi(pageA, 'hello from alice')
 
-      // B3 may leave Bob's pin display:none, so assert on the DOM count.
       await expect(pageB.locator('.c11n-pin')).toHaveCount(1, { timeout: 5_000 })
     } finally {
       await ctxA.close()
@@ -230,9 +252,7 @@ test.describe('reply and resolve', () => {
       await signedIn(pageA, alice.email, alice.name)
       await signedIn(pageB, bob.email, bob.name)
 
-      // B3 leaves pins display:none, so open the thread from the sidebar row
-      // (same store action `openThread`) instead of clicking a pin that
-      // Playwright cannot see.
+      // Open the thread from the sidebar row (same store action `openThread`).
       await pageA.locator('.c11n-sidebar-toggle').click()
       await expect(pageA.locator('.c11n-sidebar-row')).toHaveCount(1)
       await pageA.locator('.c11n-sidebar-row').click()
@@ -240,11 +260,8 @@ test.describe('reply and resolve', () => {
 
       await pageA.locator('.c11n-popover-reply-text').fill('replied by alice')
       await pageA.locator('.c11n-reply-submit').click()
-      // `.first()` on purpose: the reply is currently rendered twice (see the
-      // `rendered once` spec below). This spec is about delivery, not dedupe.
-      await expect(pageA.locator('.c11n-popover-reply-body').first()).toHaveText(
-        'replied by alice',
-      )
+      await expect(pageA.locator('.c11n-popover-reply-body')).toHaveCount(1)
+      await expect(pageA.locator('.c11n-popover-reply-body')).toHaveText('replied by alice')
       expect((await listReplies(seeded.id)).length).toBe(1)
 
       // Bob opens the same thread and sees the reply (fetched on open).
@@ -275,13 +292,7 @@ test.describe('reply and resolve', () => {
     }
   })
 
-  // Found by this harness, not in the assessment: the reply realtime echo is
-  // not deduped the way comments are, so one stored reply can render as two
-  // <li> (1 row in the DB, 2 `.c11n-popover-reply-body` in the DOM).
-  // fixme, not fail: reproduced 10/10 in isolation (--repeat-each=10) but it
-  // also depends on whether the realtime echo beats the HTTP response, and one
-  // full-suite run rendered a single reply — a `test.fail()` would flake.
-  test.fixme('a UI reply is rendered once', async ({ page }) => {
+  test('a UI reply is rendered once', async ({ page }) => {
     const user = await createUser(undefined, 'Reply Echo')
     const seeded = await seedComment({
       author: user.id,
@@ -299,6 +310,10 @@ test.describe('reply and resolve', () => {
 
     await expect(page.locator('.c11n-popover-reply-body')).toHaveCount(1, { timeout: 5_000 })
     expect((await listReplies(seeded.id)).length).toBe(1)
+
+    // Same race as the body dedupe: the reply's author name must survive the
+    // echo/HTTP upsert, not degrade to the literal "author".
+    await expect(page.locator('.c11n-popover-reply .c11n-popover-author')).toHaveText(user.name)
   })
 })
 

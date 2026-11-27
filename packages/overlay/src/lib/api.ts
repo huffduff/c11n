@@ -155,9 +155,12 @@ export function createPocketBaseBackend(baseUrl = '/__c11n/pb'): C11nBackend {
     async createComment(input) {
       const me = requireAuth()
       const projectId = await resolveProjectId(input.project)
+      // Expand the author: the create response is upserted over the realtime
+      // echo, and the echo carries no expand — without this the HTTP record
+      // (authorName undefined) would blank the name backfilled from session.
       const rec = await pb
         .collection('comments')
-        .create({ ...input, project: projectId, author: me.id })
+        .create({ ...input, project: projectId, author: me.id }, { expand: 'author' })
       return mapComment(rec)
     },
 
@@ -176,11 +179,16 @@ export function createPocketBaseBackend(baseUrl = '/__c11n/pb'): C11nBackend {
 
     async createReply(commentId, body) {
       const me = requireAuth()
-      const rec = await pb.collection('replies').create({
-        comment: commentId,
-        body,
-        author: me.id,
-      })
+      // Same reason as createComment: keep the display name on the record the
+      // caller upserts over the (unexpanded) realtime echo.
+      const rec = await pb.collection('replies').create(
+        {
+          comment: commentId,
+          body,
+          author: me.id,
+        },
+        { expand: 'author' },
+      )
       return mapReply(rec)
     },
 
@@ -190,9 +198,15 @@ export function createPocketBaseBackend(baseUrl = '/__c11n/pb'): C11nBackend {
       // unsubscribes before the lookup lands.
       let cancelled = false
 
-      // Replies carry no project field, so they can't be scoped without a
-      // per-event lookup; subscribe to all and pass through. Consumers hold
-      // the comments for the current project and can ignore unknown parents.
+      // Replies carry no project field — the project lives on the parent
+      // comment — so the subscription is scoped through the relation:
+      // `comment.project = <id>`. PocketBase 0.39 applies realtime filters
+      // server-side, including relation traversal (proved by
+      // e2e/specs/realtime-scope.spec.ts: a reply in project Y never reaches
+      // a project-X subscriber). Without it, every authenticated user would
+      // receive every reply body on the server. The store still ignores
+      // replies it has no comment for, which covers the moment between a
+      // comment arriving and this filter being in effect.
       const onReply = (e: { action: string; record: AnyRecord }) => {
         const rec = mapReply(e.record)
         if (e.action === 'create') handlers.onReplyCreate?.(rec)
@@ -222,7 +236,9 @@ export function createPocketBaseBackend(baseUrl = '/__c11n/pb'): C11nBackend {
             })
             .catch((err) => console.warn('c11n: comments subscribe failed', err))
           pb.collection('replies')
-            .subscribe('*', onReply)
+            .subscribe('*', onReply, {
+              filter: pb.filter('comment.project = {:projectId}', { projectId }),
+            })
             .catch((err) => console.warn('c11n: replies subscribe failed', err))
         })
         .catch((err) => console.warn('c11n: project lookup failed, realtime disabled', err))

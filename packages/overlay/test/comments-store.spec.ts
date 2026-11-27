@@ -1,10 +1,11 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { createPinia, setActivePinia } from 'pinia'
 import { setBackend } from '../src/lib/backend'
-import type { C11nBackend, CommentRec, ReplyRec } from '../src/lib/api'
+import type { C11nBackend, CommentRec, RealtimeHandlers, ReplyRec } from '../src/lib/api'
 import type { Anchor } from '../src/lib/anchor'
 import { PROJECT } from '../src/lib/project'
 import { useCommentsStore } from '../src/stores/comments'
+import { useSessionStore } from '../src/stores/session'
 
 const anchor: Anchor = {
   selector: '#hero',
@@ -204,6 +205,255 @@ describe('useCommentsStore', () => {
 
       expect(mock.createComment).not.toHaveBeenCalled()
     })
+
+    // B4: the realtime create echo can beat the HTTP response. Both paths
+    // must agree on identity, or the pin (and the sidebar row) renders twice.
+    it('keeps one item when the realtime echo lands before createComment resolves', async () => {
+      const saved = rec({ id: 'c-new', body: 'Make it pop' })
+      let handlers: RealtimeHandlers = {}
+      const mock = makeMockBackend({
+        subscribe: vi.fn((_project: string, h: RealtimeHandlers) => {
+          handlers = h
+          return () => {}
+        }),
+        createComment: vi.fn(async () => {
+          handlers.onCommentCreate!(saved) // echo arrives first
+          return saved
+        }),
+      })
+      setBackend(mock)
+      const store = useCommentsStore()
+      store.startRealtime()
+      await store.setPath('/pricing')
+      store.enterPickMode()
+      store.beginCompose(anchor)
+
+      await store.saveComment('Make it pop')
+
+      expect(store.items.filter((c) => c.id === 'c-new')).toHaveLength(1)
+      expect(store.items.map((c) => c.id)).toEqual(['c-new'])
+      expect(store.sidebarComments.filter((c) => c.id === 'c-new')).toHaveLength(1)
+    })
+
+    it('upserts the saved comment into the sidebar list by id', async () => {
+      const saved = rec({ id: 'c-new', body: 'Make it pop' })
+      setBackend(makeMockBackend({ createComment: vi.fn().mockResolvedValue(saved) }))
+      const store = useCommentsStore()
+      await store.setPath('/pricing')
+      store.sidebarComments = [rec({ id: 'c-old' }), saved]
+      store.enterPickMode()
+      store.beginCompose(anchor)
+
+      await store.saveComment('Make it pop')
+
+      // Existing row updated in place, never appended a second time.
+      expect(store.sidebarComments.map((c) => c.id)).toEqual(['c-old', 'c-new'])
+    })
+  })
+
+  // Review fix: the realtime echo is backfilled from `session.me`, while the
+  // HTTP create response carries no expanded author (`authorName: undefined`).
+  // Whichever lands second must not erase the name, or the UI falls back to
+  // the literal "author".
+  describe('author name across the echo/HTTP race', () => {
+    const me = { id: 'u1', email: 'alice@example.com', name: 'Alice' }
+    /** A record as the backend maps it without `expand: 'author'`. */
+    const noName = <T extends { authorName?: string }>(r: T): T => ({ ...r, authorName: undefined })
+
+    const replyRec = (overrides: Partial<ReplyRec> = {}): ReplyRec => ({
+      id: 'r2',
+      comment: 'c1',
+      body: 'echo me',
+      author: 'u1',
+      authorName: 'Alice',
+      created: '2026-08-19 10:05:00',
+      ...overrides,
+    })
+
+    beforeEach(() => {
+      useSessionStore().me = me
+    })
+
+    /** Save a comment while the realtime echo arrives before/after the write. */
+    async function saveCommentWithEcho(order: 'echo-first' | 'http-first') {
+      const saved = rec({ id: 'c-new', body: 'hi' })
+      let handlers: RealtimeHandlers = {}
+      const mock = makeMockBackend({
+        subscribe: vi.fn((_project: string, h: RealtimeHandlers) => {
+          handlers = h
+          return () => {}
+        }),
+        createComment: vi.fn(async () => {
+          if (order === 'echo-first') handlers.onCommentCreate!(noName(saved))
+          return noName(saved)
+        }),
+      })
+      setBackend(mock)
+      const store = useCommentsStore()
+      store.startRealtime()
+      await store.setPath('/pricing')
+      store.enterPickMode()
+      store.beginCompose(anchor)
+
+      await store.saveComment('hi')
+      if (order === 'http-first') handlers.onCommentCreate!(noName(saved))
+      return store
+    }
+
+    /** Reply to a loaded thread while the realtime echo arrives before/after. */
+    async function addReplyWithEcho(order: 'echo-first' | 'http-first') {
+      const created = replyRec()
+      let handlers: RealtimeHandlers = {}
+      const mock = makeMockBackend({
+        listReplies: vi.fn().mockResolvedValue([]),
+        subscribe: vi.fn((_project: string, h: RealtimeHandlers) => {
+          handlers = h
+          return () => {}
+        }),
+        createReply: vi.fn(async () => {
+          if (order === 'echo-first') handlers.onReplyCreate!(noName(created))
+          return noName(created)
+        }),
+      })
+      setBackend(mock)
+      const store = useCommentsStore()
+      store.startRealtime()
+      await store.loadReplies('c1')
+
+      await store.addReply('c1', 'echo me')
+      if (order === 'http-first') handlers.onReplyCreate!(noName(created))
+      return store
+    }
+
+    it('keeps the author name on a comment when the echo lands first', async () => {
+      const store = await saveCommentWithEcho('echo-first')
+
+      expect(store.items).toHaveLength(1)
+      expect(store.items[0].authorName).toBe('Alice')
+    })
+
+    it('keeps the author name on a comment when the HTTP response lands first', async () => {
+      const store = await saveCommentWithEcho('http-first')
+
+      expect(store.items).toHaveLength(1)
+      expect(store.items[0].authorName).toBe('Alice')
+    })
+
+    it('keeps the author name on a reply when the echo lands first', async () => {
+      const store = await addReplyWithEcho('echo-first')
+
+      expect(store.replies.get('c1')).toHaveLength(1)
+      expect(store.replies.get('c1')![0].authorName).toBe('Alice')
+    })
+
+    it('keeps the author name on a reply when the HTTP response lands first', async () => {
+      const store = await addReplyWithEcho('http-first')
+
+      expect(store.replies.get('c1')).toHaveLength(1)
+      expect(store.replies.get('c1')![0].authorName).toBe('Alice')
+    })
+  })
+
+  // Review fix: a realtime `delete` can beat the create's HTTP response (e.g.
+  // the author deleted it from another tab). Upserting that response blindly
+  // resurrects a row that no longer exists server-side.
+  describe('records deleted before the create response lands', () => {
+    const replyRec = (overrides: Partial<ReplyRec> = {}): ReplyRec => ({
+      id: 'r2',
+      comment: 'c1',
+      body: 'gone already',
+      author: 'u1',
+      authorName: 'Tom',
+      created: '2026-08-19 10:05:00',
+      ...overrides,
+    })
+
+    it('does not resurrect a comment whose delete echo arrived first', async () => {
+      const saved = rec({ id: 'c-new', body: 'deleted meanwhile' })
+      let handlers: RealtimeHandlers = {}
+      setBackend(
+        makeMockBackend({
+          subscribe: vi.fn((_project: string, h: RealtimeHandlers) => {
+            handlers = h
+            return () => {}
+          }),
+          createComment: vi.fn(async () => {
+            handlers.onCommentDelete!(saved) // delete arrives before the response
+            return saved
+          }),
+        }),
+      )
+      const store = useCommentsStore()
+      store.startRealtime()
+      await store.setPath('/pricing')
+      store.sidebarComments = []
+      store.enterPickMode()
+      store.beginCompose(anchor)
+
+      await store.saveComment('deleted meanwhile')
+
+      expect(store.items.map((c) => c.id)).toEqual([])
+      expect(store.sidebarComments.map((c) => c.id)).toEqual([])
+    })
+
+    it('does not resurrect a reply whose delete echo arrived first', async () => {
+      const created = replyRec()
+      let handlers: RealtimeHandlers = {}
+      setBackend(
+        makeMockBackend({
+          listReplies: vi.fn().mockResolvedValue([replyRec({ id: 'r1' })]),
+          subscribe: vi.fn((_project: string, h: RealtimeHandlers) => {
+            handlers = h
+            return () => {}
+          }),
+          createReply: vi.fn(async () => {
+            handlers.onReplyDelete!(created)
+            return created
+          }),
+        }),
+      )
+      const store = useCommentsStore()
+      store.startRealtime()
+      await store.loadReplies('c1')
+
+      await store.addReply('c1', 'gone already')
+
+      expect(store.replies.get('c1')!.map((r) => r.id)).toEqual(['r1'])
+    })
+
+    it('ignores a late echo of an already-deleted record', async () => {
+      let handlers: RealtimeHandlers = {}
+      setBackend(
+        makeMockBackend({
+          subscribe: vi.fn((_project: string, h: RealtimeHandlers) => {
+            handlers = h
+            return () => {}
+          }),
+        }),
+      )
+      const store = useCommentsStore()
+      store.startRealtime()
+
+      handlers.onCommentCreate!(rec({ id: 'c-gone' }))
+      handlers.onCommentDelete!(rec({ id: 'c-gone' }))
+      expect(store.items.map((c) => c.id)).toEqual([])
+
+      // The update/create of that id still in flight must not re-add it.
+      handlers.onCommentUpdate!(rec({ id: 'c-gone', body: 'zombie' }))
+      expect(store.items.map((c) => c.id)).toEqual([])
+    })
+
+    it('bounds the deleted-id set so a long session cannot grow it forever', () => {
+      setBackend(makeMockBackend())
+      const store = useCommentsStore()
+
+      for (let i = 0; i < 250; i++) store.rememberDeleted(`c-${i}`)
+
+      expect(store.deletedIds.size).toBe(200)
+      // Oldest evicted, newest kept.
+      expect(store.deletedIds.has('c-0')).toBe(false)
+      expect(store.deletedIds.has('c-249')).toBe(true)
+    })
   })
 
   describe('getters', () => {
@@ -385,6 +635,45 @@ describe('useCommentsStore', () => {
       await store.addReply('c1', 'first!')
 
       expect(store.replies.get('c1')).toEqual([created])
+    })
+
+    // B5: the realtime reply echo and the HTTP response are the same record.
+    // Whichever lands second must be an update, not a second reply.
+    it('keeps one reply when the realtime echo lands before createReply resolves', async () => {
+      const created = replyRec({ id: 'r2', body: 'echo me' })
+      let handlers: RealtimeHandlers = {}
+      const mock = makeMockBackend({
+        listReplies: vi.fn().mockResolvedValue([replyRec({ id: 'r1' })]),
+        subscribe: vi.fn((_project: string, h: RealtimeHandlers) => {
+          handlers = h
+          return () => {}
+        }),
+        createReply: vi.fn(async () => {
+          handlers.onReplyCreate!(created) // echo arrives first
+          return created
+        }),
+      })
+      setBackend(mock)
+      const store = useCommentsStore()
+      store.startRealtime()
+      await store.loadReplies('c1')
+
+      await store.addReply('c1', 'echo me')
+
+      expect(store.replies.get('c1')!.map((r) => r.id)).toEqual(['r1', 'r2'])
+    })
+
+    it('replaces the cached replies array so consumers re-render reactively', async () => {
+      const created = replyRec({ id: 'r2' })
+      setBackend(makeMockBackend({ createReply: vi.fn().mockResolvedValue(created) }))
+      const store = useCommentsStore()
+      await store.loadReplies('c1')
+      const before = store.replies.get('c1')
+
+      await store.addReply('c1', 'echo me')
+
+      expect(store.replies.get('c1')).not.toBe(before)
+      expect(store.replies.get('c1')!.map((r) => r.id)).toEqual(['r2'])
     })
 
     it('addReply failure sets error and leaves the cache untouched', async () => {

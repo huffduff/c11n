@@ -13,6 +13,7 @@
 import { onBeforeUnmount, ref, watch } from 'vue'
 import { useCommentsStore } from '../stores/comments'
 import { trackElements } from '../lib/tracker'
+import type { ElementTracker, TrackCause } from '../lib/tracker'
 import type { CommentRec } from '../lib/types'
 
 const store = useCommentsStore()
@@ -23,8 +24,16 @@ const rects = ref(new Map<string, DOMRect>())
 
 // Element refs stay out of reactive state (same rule as picker.ts).
 let targets = new Map<string, Element>()
-let stopTracking: (() => void) | null = null
+let tracker: ElementTracker | null = null
 let resolving = false
+// Set on unmount: a frame scheduled before teardown must not rebuild the
+// tracker on a dead component.
+let dead = false
+
+/** Cheap, order-insensitive identity of the current target set. */
+function targetKey(): string {
+  return [...targets.keys()].sort().join('\n')
+}
 
 /** Re-run anchor resolution against the live DOM and swap the target set. */
 function reresolve() {
@@ -41,19 +50,39 @@ function reresolve() {
   }
 }
 
-/** Full restart: new page/items → resolve + (re)start the tracker. */
-function refresh() {
+/**
+ * Tracker callback. The rects it hands over were measured against the target
+ * set as it was BEFORE the triggering mutation, so a target that mutation
+ * revealed has no rect — and its pin, rendered inside the shadow root, is
+ * invisible to the observer that would otherwise schedule another frame. When
+ * re-resolving actually changes the set, ask the tracker for one more frame.
+ */
+function onUpdate(next: Map<string, DOMRect>, causes: Set<TrackCause>) {
+  if (dead) return
+  // Accept the geometry first: with a synchronous rAF (tests) refresh() below
+  // recomputes inside this call, and assigning these older rects afterwards
+  // would undo the fresh ones.
+  rects.value = next
+  if (!causes.has('mutation')) return
+
+  const before = targetKey()
   reresolve()
-  if (!stopTracking) {
-    stopTracking = trackElements(
-      () => targets,
-      (next, causes) => {
-        // Mutations may have added/removed anchored elements — re-resolve
-        // before accepting geometry so pins appear/disappear correctly.
-        if (causes.has('mutation')) reresolve()
-        rects.value = next
-      },
-    )
+  // Guarded on the id set, not on the cause: it changes at most once per
+  // real mutation, so the extra frame converges instead of looping.
+  if (targetKey() !== before) tracker?.refresh()
+}
+
+/** Full restart: new page/items → resolve + (re)start/recompute the tracker. */
+function refresh() {
+  if (dead) return
+  reresolve()
+  if (!tracker) {
+    tracker = trackElements(() => targets, onUpdate)
+  } else {
+    // Items/path changed but the document may not have: force a recompute
+    // for the freshly resolved targets, or pins stay display:none until the
+    // next scroll/resize (B3).
+    tracker.refresh()
   }
 }
 
@@ -62,8 +91,9 @@ function refresh() {
 // Deep: resolve() flips items[i].resolved in place and the pin must drop.
 watch(() => [store.items, store.currentPath], refresh, { deep: true, immediate: true })
 onBeforeUnmount(() => {
-  stopTracking?.()
-  stopTracking = null
+  dead = true
+  tracker?.stop()
+  tracker = null
 })
 
 function pinStyle(id: string): Record<string, string> {

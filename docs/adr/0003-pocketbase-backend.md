@@ -24,7 +24,14 @@ a separate service.
   `seq` hook did, and it deadlocked (assessment B2). The rule: use
   `onRecordCreateExecute` and `e.app`. That pattern was verified on 0.39.11
   with 13 creates, 10 of them concurrent: seqs 1..13, all unique.
-- The PocketBase server and JS SDK versions are pinned together on
-  purpose. Both are bumped in the same PR.
+- **Server and SDK are versioned together.** As of this ADR the pins are
+  PocketBase server **0.39.11** (`scripts/tools.env`, the base image and the
+  release zip) and the `pocketbase` JS SDK **0.27.3** (exact, no range, in
+  `packages/overlay/package.json`). The mapping comes from the SDK's
+  CHANGELOG: 0.27.x is the client for the 0.39 server API (`pb.sql.run`
+  arrived in 0.27.0 for "the upcoming PocketBase v0.39.0"), and 0.28.0
+  already targets 0.40. A server bump moves the SDK in the same PR, never
+  separately; `scripts/check-pins.mjs` (CI: `npm run check:pins`) fails if
+  they drift.
 - Backups use PocketBase's built-in backup API, sent to S3-compatible
   storage (plan Phase 5).

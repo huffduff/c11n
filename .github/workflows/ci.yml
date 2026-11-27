@@ -289,10 +289,18 @@ jobs:
           printf '%s\n' "$SASSER_DEPLOY_KEY" > "$key"
           printf '%s\n' 'github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl' > "$known_hosts"
           export GIT_SSH_COMMAND="ssh -i $key -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=$known_hosts"
+          # TEMP-DIAG: what does ssh itself say? (public key material only)
+          echo "::group::ssh probe"
+          ssh -v -T -o BatchMode=yes -i "$key" -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$known_hosts" git@github.com 2>&1 | grep -vE 'debug1: (Reading|kex|SSH2|Local|Remote|compat|Sending|Entering|expecting|Authentications|Next|SSH_MSG|channel|Requesting|Will|pledge|Authenticated|Offering|Server accepts|Connecting|Connection|identity file|load)' || true
+          echo "::endgroup::"
           rm -rf .stack-sasser
           mkdir -p .stack-sasser
           git -C .stack-sasser init -q
-          git -C .stack-sasser fetch --depth 1 --no-tags git@github.com/huffduff/sasser-studios.git "$SASSER_REF"
+          fetch_log="$RUNNER_TEMP/sasser-fetch.log"
+          if ! git -C .stack-sasser fetch --depth 1 --no-tags git@github.com/huffduff/sasser-studios.git "$SASSER_REF" 2>&1 | tee "$fetch_log"; then
+            echo "::error::git fetch of sasser-studios@$SASSER_REF failed (see the log above)"
+            exit 1
+          fi
           git -C .stack-sasser checkout -q --detach FETCH_HEAD
           test ! -e "$key"
           echo "read-only deploy key used for one fetch and removed ($key)"

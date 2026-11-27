@@ -1,16 +1,22 @@
 services:
   caddy:
-    build: ./caddy
+    # The build context is the repo root: the image compiles the overlay
+    # workspace and bakes the bundle, the sign-in page and the Caddyfile in.
+    build:
+      context: ..
+      dockerfile: deploy/caddy/Dockerfile
     ports:
       - "8080:8080"
     volumes:
+      # Compose is DEV ONLY (ADR 0005). The image already carries all three;
+      # the bind mounts just keep a dev loop from rebuilding the image for
+      # every overlay or sign-in change.
       - type: bind
         source: ./Caddyfile
         target: /etc/caddy/Caddyfile
         read_only: true
       - ../packages/overlay/dist:/srv/overlay:ro
-      # The static sign-in page (task 3.7), served at /__c11n/auth/. Baked into
-      # the image in production (Phase 5); a bind mount keeps dev rebuild-free.
+      # The static sign-in page (task 3.7), served at /__c11n/auth/.
       - ../packages/signin:/srv/signin:ro
     environment:
       - C11N_UPSTREAM=${C11N_UPSTREAM:-http://demo:5173}

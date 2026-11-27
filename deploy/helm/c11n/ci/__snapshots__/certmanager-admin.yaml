@@ -1,0 +1,597 @@
+---
+# Source: c11n/templates/networkpolicy.yaml
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: c11n-pocketbase
+  labels:
+    helm.sh/chart: "c11n-0.1.0"
+    app.kubernetes.io/name: c11n
+    app.kubernetes.io/instance: c11n
+    app.kubernetes.io/version: "0.1.0"
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/component: pocketbase
+  annotations:
+    c11n.io/why: >-
+      Only caddy pods (and the ingress controller, when the admin Ingress is
+      enabled) may reach PocketBase on 8090. PocketBase has no business being
+      reachable from every pod in the cluster.
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: c11n
+      app.kubernetes.io/instance: c11n
+      app.kubernetes.io/component: pocketbase
+  policyTypes:
+    - Ingress
+  ingress:
+    # (a) the proxy. A bare podSelector means "in THIS namespace", which is
+    # what makes this safe: another release's caddy pods carry a different
+    # app.kubernetes.io/instance and never match.
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: c11n
+              app.kubernetes.io/instance: c11n
+              app.kubernetes.io/component: caddy
+      ports:
+        - protocol: TCP
+          port: 8090
+    # The admin Ingress (an explicit opt-in) publishes the superuser UI: it
+    # comes in through the ingress controller, so the controller's namespace
+    # needs 8090 too. Without adminIngress this rule does not exist, so the
+    # controller cannot reach PocketBase on any port.
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: "kube-system"
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: traefik
+        - ipBlock:
+            cidr: "10.0.0.0/8"
+      ports:
+        - protocol: TCP
+          port: 8090
+
+---
+# Source: c11n/templates/networkpolicy.yaml
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: c11n-caddy
+  labels:
+    helm.sh/chart: "c11n-0.1.0"
+    app.kubernetes.io/name: c11n
+    app.kubernetes.io/instance: c11n
+    app.kubernetes.io/version: "0.1.0"
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/component: caddy
+  annotations:
+    c11n.io/why: >-
+      The review origin answers only the ingress controller (plus any CIDR or
+      pod selector the operator adds). Egress is unrestricted on purpose: the
+      proxy has to reach the reviewed upstream and PocketBase.
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: c11n
+      app.kubernetes.io/instance: c11n
+      app.kubernetes.io/component: caddy
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: "kube-system"
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: traefik
+        - ipBlock:
+            cidr: "10.0.0.0/8"
+      ports:
+        - protocol: TCP
+          port: 8080
+
+---
+# Source: c11n/templates/caddy-pdb.yaml
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: c11n-caddy
+  labels:
+    helm.sh/chart: "c11n-0.1.0"
+    app.kubernetes.io/name: c11n
+    app.kubernetes.io/instance: c11n
+    app.kubernetes.io/version: "0.1.0"
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/component: caddy
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: c11n
+      app.kubernetes.io/instance: c11n
+      app.kubernetes.io/component: caddy
+
+---
+# Source: c11n/templates/service.yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: c11n-caddy
+  labels:
+    helm.sh/chart: "c11n-0.1.0"
+    app.kubernetes.io/name: c11n
+    app.kubernetes.io/instance: c11n
+    app.kubernetes.io/version: "0.1.0"
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/component: caddy
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: c11n
+    app.kubernetes.io/instance: c11n
+    app.kubernetes.io/component: caddy
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http
+      protocol: TCP
+
+---
+# Source: c11n/templates/service.yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: c11n-pocketbase
+  labels:
+    helm.sh/chart: "c11n-0.1.0"
+    app.kubernetes.io/name: c11n
+    app.kubernetes.io/instance: c11n
+    app.kubernetes.io/version: "0.1.0"
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/component: pocketbase
+  annotations:
+    c11n.io/internal: >-
+      Cluster-internal. Caddy reaches it as c11n-pocketbase:8090 and the
+      optional admin Ingress points at it; the NetworkPolicy is what limits who
+      may dial it.
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: c11n
+    app.kubernetes.io/instance: c11n
+    app.kubernetes.io/component: pocketbase
+  ports:
+    - name: pb
+      port: 8090
+      targetPort: pb
+      protocol: TCP
+
+---
+# Source: c11n/templates/service.yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: c11n-pocketbase-headless
+  labels:
+    helm.sh/chart: "c11n-0.1.0"
+    app.kubernetes.io/name: c11n
+    app.kubernetes.io/instance: c11n
+    app.kubernetes.io/version: "0.1.0"
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/component: pocketbase
+spec:
+  # Governs the StatefulSet: pod 0 gets <pod>.<service>.<ns>.svc. No traffic
+  # goes through it (a headless Service resolves to pod IPs and nothing else),
+  # which is why caddy addresses the ClusterIP Service above instead.
+  type: ClusterIP
+  clusterIP: None
+  selector:
+    app.kubernetes.io/name: c11n
+    app.kubernetes.io/instance: c11n
+    app.kubernetes.io/component: pocketbase
+  ports:
+    - name: pb
+      port: 8090
+      targetPort: pb
+      protocol: TCP
+
+---
+# Source: c11n/templates/caddy-deployment.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: c11n-caddy
+  labels:
+    helm.sh/chart: "c11n-0.1.0"
+    app.kubernetes.io/name: c11n
+    app.kubernetes.io/instance: c11n
+    app.kubernetes.io/version: "0.1.0"
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/component: caddy
+spec:
+  # caddy.replicas, default 1. Anything above 1 is safe (the pods share nothing)
+  # and is how a review site survives a node drain without an ingress 503.
+  replicas: 2
+  # RollingUpdate with maxUnavailable 0: a new pod must be Ready before the old
+  # one goes. maxSurge 1 keeps the rollout inside one extra pod, so a
+  # single-replica site still rolls (readiness only needs the ungated sign-in
+  # page, not PocketBase).
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: c11n
+      app.kubernetes.io/instance: c11n
+      app.kubernetes.io/component: caddy
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: c11n
+        app.kubernetes.io/instance: c11n
+        app.kubernetes.io/component: caddy
+      annotations:
+        checksum/config: ba6ba77aef634be27bf676564f0dc6af234a960e52a0ba5c4cd26f1d0ce3ab04
+    spec:
+      # Nothing in this pod talks to the Kubernetes API, so it has no token to
+      # misuse if a container is compromised.
+      automountServiceAccountToken: false
+      # Same pod security as before the split. No fsGroup: the pod's volumes are
+      # emptyDirs the kubelet already creates writable for the running uid, and
+      # there is no data volume here to group-own (pocketbase sets fsGroup).
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: caddy
+          image: "ghcr.io/huffduff/c11n-caddy@sha256:1111111111111111111111111111111111111111111111111111111111111111"
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+          # The entrypoint is named, not inherited. Kubernetes replaces the
+          # image CMD with `args`, so the binary has to be a `command`: args
+          # alone would make the kubelet exec `run`. Absolute path on purpose;
+          # nothing here depends on the image's PATH or WORKDIR.
+          command:
+            - /usr/bin/caddy
+          args:
+            - run
+            - --config
+            - /etc/caddy/Caddyfile
+            - --adapter
+            - caddyfile
+          ports:
+            - name: http
+              containerPort: 8080
+              protocol: TCP
+          env:
+            # A Service hop now, not loopback: PocketBase is its own workload.
+            # <fullname>-pocketbase resolves in this namespace and is the only
+            # source the pocketbase NetworkPolicy lets 8090 through for.
+            - name: C11N_PB_ADDR
+              value: "c11n-pocketbase:8090"
+            - name: C11N_UPSTREAM
+              value: "https://staging.example.com"
+            - name: C11N_UPSTREAM_TLS
+              value: "verify"
+            # C11N_LISTEN, C11N_OVERLAY_DIR and C11N_SIGNIN_DIR are baked into
+            # the image (:8080, /srv/overlay, /srv/signin) because the Caddyfile
+            # and the assets ship together.
+          # /__c11n/auth/ is the one route with no session gate in front of it
+          # (it is the static sign-in page), so it answers even while PocketBase
+          # is down - which is what stops this Deployment's rollout from
+          # deadlocking on its own gate. /__c11n/overlay.js returns 401 without
+          # a session, so it cannot be a probe.
+          readinessProbe:
+            httpGet:
+              path: /__c11n/auth/
+              port: http
+            initialDelaySeconds: 2
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+          livenessProbe:
+            httpGet:
+              path: /__c11n/auth/
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 20
+            timeoutSeconds: 5
+            failureThreshold: 3
+          resources:
+            limits:
+              memory: 256Mi
+            requests:
+              cpu: 50m
+              memory: 64Mi
+          volumeMounts:
+            # readOnlyRootFilesystem: Caddy still writes its autosave config
+            # and any on-disk state under XDG_CONFIG_HOME/XDG_DATA_HOME
+            # (/config, /data - set in the image), plus temp files in /tmp.
+            - name: caddy-config
+              mountPath: /config
+            - name: caddy-data
+              mountPath: /data
+            - name: tmp
+              mountPath: /tmp
+      # No pb-data volume and no PVC here: the reviewed site's database belongs
+      # to the pocketbase StatefulSet's volumeClaimTemplate. check-chart asserts
+      # that this Deployment never mounts it.
+      volumes:
+        - name: caddy-config
+          emptyDir: {}
+        - name: caddy-data
+          emptyDir: {}
+        - name: tmp
+          emptyDir: {}
+
+---
+# Source: c11n/templates/pocketbase-statefulset.yaml
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: c11n-pocketbase
+  labels:
+    helm.sh/chart: "c11n-0.1.0"
+    app.kubernetes.io/name: c11n
+    app.kubernetes.io/instance: c11n
+    app.kubernetes.io/version: "0.1.0"
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/component: pocketbase
+spec:
+  # HARDCODED, NOT A VALUE - do not expose this as one. PocketBase is SQLite:
+  # a single writer. Two pods on one volume corrupt it; two pods on two volumes
+  # are two different review sites. One reviewed site = one release = one
+  # pocketbase pod (ADR 0005). check-chart asserts that no values file can move
+  # this off 1.
+  replicas: 1
+  # OrderedReady is the StatefulSet default and is spelled out because it is
+  # load-bearing: pod 0 is created, becomes Ready, and only then would pod 1 be
+  # (there is never a pod 1 - see replicas above).
+  podManagementPolicy: OrderedReady
+  # The headless Service that gives the pod its stable DNS name
+  # (<pod>.<service>.<ns>.svc). PocketBase does not need it to serve, but a
+  # StatefulSet requires a governing Service and caddy's Service is not it.
+  serviceName: c11n-pocketbase-headless
+  # Retain / Retain: scaling this (which would be a mistake) and deleting the
+  # StatefulSet (which `helm uninstall` does) both leave pb_data's claim and
+  # volume behind. Deleting the data is then one explicit `kubectl delete pvc`,
+  # never a side effect of an uninstall. See docs/runbook.md sections 4 and 10.
+  persistentVolumeClaimRetentionPolicy:
+    whenDeleted: Retain
+    whenScaled: Retain
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: c11n
+      app.kubernetes.io/instance: c11n
+      app.kubernetes.io/component: pocketbase
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: c11n
+        app.kubernetes.io/instance: c11n
+        app.kubernetes.io/component: pocketbase
+      annotations:
+        checksum/config: 204b1b0cf6e01c630996cf714a97d88aa73e169aa6f1bb654fc2315fc72a78f5
+    spec:
+      # Nothing in this pod talks to the Kubernetes API.
+      automountServiceAccountToken: false
+      # Both images run as 65532 (see their Dockerfiles). Numeric ids because
+      # runAsNonRoot cannot verify a named user; fsGroup makes the volume
+      # writable for pocketbase without a chown.
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+        fsGroupChangePolicy: OnRootMismatch
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: pocketbase
+          image: "ghcr.io/huffduff/c11n-pocketbase@sha256:2222222222222222222222222222222222222222222222222222222222222222"
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+          # Explicit command AND args, never args alone: Kubernetes REPLACES
+          # the image CMD with `args`, so args without a command leave the
+          # kubelet exec'ing the first arg ("exec: \"serve\": executable file
+          # not found in $PATH", found on k3s). The absolute path also makes the
+          # pod independent of the image's ENTRYPOINT, PATH and WORKDIR, and the
+          # dirs are spelled out so a base image whose CMD drifts cannot move
+          # where the data lives.
+          command:
+            - /pb/pocketbase
+          args:
+            - serve
+            - --http=0.0.0.0:8090
+            - --dir=/pb/pb_data
+            - --migrationsDir=/pb/pb_migrations
+            - --hooksDir=/pb/pb_hooks
+          ports:
+            - name: pb
+              containerPort: 8090
+              protocol: TCP
+          env:
+            # ---- identity (ADR 0006) ----
+            - name: C11N_OWNER_EMAIL
+              value: "owner@example.com"
+            # Invite links are absolute: this is the origin they point at.
+            - name: C11N_PUBLIC_URL
+              value: "https://review.example.com"
+            - name: C11N_SESSION_TTL_DAYS
+              value: "14"
+            - name: C11N_LINK_TTL_HOURS
+              value: "72"
+            - name: C11N_INVITE_RATE_PER_HOUR
+              value: "30"
+            - name: C11N_COOKIE_SECURE
+              value: "true"
+            # ---- scheduled backups (5.4) ----
+            # Read once, on the first request, by pb_hooks/settings.pb.js.
+            # Empty cron = the hook leaves PocketBase's settings alone.
+            - name: C11N_BACKUP_CRON
+              value: ""
+            - name: C11N_BACKUP_KEEP
+              value: "14"
+            # ---- SMTP (POST-MVP, INERT) ----
+            # Nothing reads these yet: invites are copy-the-link (ADR 0006).
+            # Wired now so turning on mail later is a values change.
+            - name: TZ
+              value: UTC
+          # /api/health answers as soon as the HTTP server is up. On a FRESH
+          # database the pending migrations run at boot first, so the startup
+          # probe is generous: it is the migration window, not a hang.
+          #
+          # These probes ARE the owner bootstrap: the first request creates the
+          # owner and prints its link (NOTES.txt, runbook section 2). Caddy's
+          # forward_auth also issues requests, so a restart with a probe that
+          # never fired still bootstraps on the first page view.
+          startupProbe:
+            httpGet:
+              path: /api/health
+              port: pb
+            periodSeconds: 2
+            timeoutSeconds: 2
+            failureThreshold: 60
+          readinessProbe:
+            httpGet:
+              path: /api/health
+              port: pb
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+          livenessProbe:
+            httpGet:
+              path: /api/health
+              port: pb
+            periodSeconds: 20
+            timeoutSeconds: 5
+            failureThreshold: 3
+          resources:
+            limits:
+              memory: 512Mi
+            requests:
+              cpu: 50m
+              memory: 128Mi
+          volumeMounts:
+            - name: pb-data
+              mountPath: /pb/pb_data
+            # readOnlyRootFilesystem: temp files (the zip staged during a
+            # backup, uploads in flight) go to /tmp.
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir: {}
+  # The reviewed site's data. Named (not generated) so the claim is
+  # pb-data-<sts>-0, i.e. c11n-pocketbase-0 -> c11n-pb-data-c11n-pocketbase-0
+  # for a release called c11n. Size and class come from persistence.*, and a
+  # change to SIZE only affects a newly created claim (Kubernetes has no
+  # shrink and StatefulSets do not re-render existing claims): to grow it, edit
+  # the PVC or delete and re-create it from a backup. docs/runbook.md section 5.
+  volumeClaimTemplates:
+    - metadata:
+        name: pb-data
+        labels:
+          helm.sh/chart: "c11n-0.1.0"
+          app.kubernetes.io/name: c11n
+          app.kubernetes.io/instance: c11n
+          app.kubernetes.io/version: "0.1.0"
+          app.kubernetes.io/managed-by: Helm
+          app.kubernetes.io/component: pocketbase
+      spec:
+        accessModes:
+          - ReadWriteOnce
+        storageClassName: "local-path"
+        resources:
+          requests:
+            storage: 5Gi
+
+---
+# Source: c11n/templates/admin-ingress.yaml
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: c11n-admin
+  labels:
+    helm.sh/chart: "c11n-0.1.0"
+    app.kubernetes.io/name: c11n
+    app.kubernetes.io/instance: c11n
+    app.kubernetes.io/version: "0.1.0"
+    app.kubernetes.io/managed-by: Helm
+  annotations:
+    c11n.io/warning: "PocketBase SUPERUSER UI - not the review host. See the chart's adminIngress values."
+    cert-manager.io/cluster-issuer: letsencrypt-prod
+spec:
+  ingressClassName: "traefik"
+  rules:
+    - host: "admin.review.example.com"
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: c11n-pocketbase
+                port:
+                  name: pb
+  tls:
+    - hosts:
+        - "admin.review.example.com"
+      # Its OWN Secret (<adminHost>-tls by default): cert-manager keeps one
+      # certificate per Secret, so sharing the review host's name would make the
+      # two Ingresses overwrite each other's certificate.
+      secretName: "admin.review.example.com-tls"
+
+---
+# Source: c11n/templates/ingress.yaml
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: c11n
+  labels:
+    helm.sh/chart: "c11n-0.1.0"
+    app.kubernetes.io/name: c11n
+    app.kubernetes.io/instance: c11n
+    app.kubernetes.io/version: "0.1.0"
+    app.kubernetes.io/managed-by: Helm
+  annotations:
+    cert-manager.io/cluster-issuer: letsencrypt-prod
+spec:
+  ingressClassName: "traefik"
+  rules:
+    - host: "review.example.com"
+      http:
+        paths:
+          # Everything goes to caddy. It gates, injects the overlay, proxies
+          # the reviewed upstream, and answers the PocketBase admin path with
+          # 404 - there is no host-level split between admin and review.
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: c11n-caddy
+                port:
+                  name: http
+  tls:
+    - hosts:
+        - "review.example.com"
+      secretName: "review.example.com-tls"

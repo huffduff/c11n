@@ -54,7 +54,7 @@ jobs:
       - name: Lint workflows
         run: |
           bash <(curl -sSfL https://raw.githubusercontent.com/rhysd/actionlint/v1.7.12/scripts/download-actionlint.bash) 1.7.12
-          ./actionlint .github/workflows/ci.yml
+          ./actionlint .github/workflows/ci.yml .github/workflows/release.yml
 
       - name: Typecheck overlay
         run: npm run typecheck -w packages/overlay
@@ -135,12 +135,18 @@ jobs:
       - name: Migrations up/down on a DB with data
         run: node scripts/check-migrations.mjs
 
-      # Load-time env validation: an out-of-range or non-integer
+      # Env validation: an out-of-range or non-integer
       # C11N_SESSION_TTL_DAYS / C11N_LINK_TTL_HOURS falls back to its default
       # and warns on stdout instead of failing every request later. No stack and
       # no browser, so it sits with the other scratch checks.
       - name: Env validation
         run: node scripts/check-env-validation.mjs
+
+      # Backups: the env-driven settings hook, then a real local backup and
+      # restore on a scratch database (no S3 bucket involved). Three scratch
+      # PocketBases, no browser.
+      - name: Backups (settings + local round trip)
+        run: node scripts/check-backups.mjs
 
       - name: Install dependencies
         run: npm ci
@@ -167,14 +173,83 @@ jobs:
             .stack/*.log
           if-no-files-found: ignore
 
+  # The Helm chart, verified without a cluster: lint, the render snapshots
+  # (scripts/check-chart.mjs) and schema validation of every rendered object.
+  chart:
+    runs-on: blacksmith-2vcpu-ubuntu-2404
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version-file: .tool-versions
+
+      # Same pin as the other jobs' .tool-versions (helm 4.3.1); setup-helm
+      # takes the bare version, so strip any leading v.
+      - uses: azure/setup-helm@v5
+        with:
+          version: v4.3.1
+
+      # kubeconform validates every rendered object against the Kubernetes
+      # JSON schemas. Pinned: a new release changing its default schema
+      # location would turn a green chart red for no chart-related reason.
+      - name: Install kubeconform
+        run: |
+          curl -sSfL -o /tmp/kubeconform.tar.gz \
+            https://github.com/yannh/kubeconform/releases/download/v0.8.0/kubeconform-linux-amd64.tar.gz
+          tar -xzf /tmp/kubeconform.tar.gz -C /tmp kubeconform
+          sudo install -m 0755 /tmp/kubeconform /usr/local/bin/kubeconform
+          kubeconform -v
+
+      - name: Helm lint
+        run: |
+          for f in deploy/helm/c11n/ci/*.yaml; do
+            helm lint deploy/helm/c11n --values "$f"
+          done
+
+      - name: Chart snapshots and required-input guards
+        run: node scripts/check-chart.mjs
+
+      - name: Validate rendered objects (kubeconform, strict)
+        run: |
+          for f in deploy/helm/c11n/ci/*.yaml; do
+            echo "---- $f"
+            helm template c11n deploy/helm/c11n --namespace c11n-ci --values "$f" \
+              | kubeconform -strict -summary -kubernetes-version 1.34.0 -
+          done
+
+  # The images compile from a repo-root context (the caddy image builds the
+  # overlay workspace). No container is run, so a green job still only means
+  # "the images build".
   docker:
     runs-on: blacksmith-2vcpu-ubuntu-2404
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v7
 
+      - uses: actions/setup-node@v7
+        with:
+          node-version-file: .tool-versions
+          cache: npm
+
+      # scripts/check-image-context.sh builds the overlay AND the demo upstream's
+      # Go module (the same build examples/demo-go-server/Dockerfile runs), so it
+      # needs the pinned go. No module cache: the server is stdlib-only.
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: .tool-versions
+          cache: false
+
+      # No daemon on the dev boxes, so the caddy build stage's COPY set is
+      # proven natively: it copies exactly what the Dockerfile COPYs and runs
+      # the same npm ci + build, then the demo server's go build. Catches a
+      # missing COPY, a .dockerignore entry, or a WORKDIR outside the module.
+      - name: Simulate the image build stages
+        run: scripts/check-image-context.sh
+
       - name: Smoke-build caddy image
-        run: docker build -t c11n-caddy:ci deploy/caddy
+        run: docker build -f deploy/caddy/Dockerfile -t c11n-caddy:ci .
 
       - name: Smoke-build pocketbase image
         run: docker build -t c11n-pb:ci deploy/pocketbase

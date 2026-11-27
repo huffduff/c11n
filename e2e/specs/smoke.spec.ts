@@ -2,7 +2,7 @@ import { expect, test } from '@playwright/test'
 import { execFileSync } from 'node:child_process'
 import fs from 'node:fs'
 import path from 'node:path'
-import { createUser, sessionCookie, signInAs } from '../fixtures'
+import { EXTERNAL, createUser, sessionCookie, signInAs } from '../fixtures'
 
 const repoRoot = path.resolve(__dirname, '../..')
 const overlayTag = '/__c11n/overlay.js'
@@ -75,6 +75,11 @@ test.describe('proxy contract', () => {
 })
 
 test.describe('Caddyfile env matrix', () => {
+  // Caddy's own binary validates the Caddyfile: a local-stack check. The
+  // cluster runs the same file baked into the image, but CADDY_BIN is not
+  // available (and not needed) when the suite targets a real deployment.
+  test.skip(EXTERNAL, 'needs the native caddy binary; not part of an external run')
+
   function validate(env: Record<string, string>): void {
     const scratch = fs.mkdtempSync(path.join(repoRoot, '.stack', 'validate-'))
     try {

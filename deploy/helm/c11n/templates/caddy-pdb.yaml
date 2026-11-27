@@ -1,0 +1,29 @@
+{{- if .Values.caddy.pdb.enabled }}
+{{- /*
+A voluntary-disruption budget for the proxy only. It is opt-in (default off)
+because a budget of minAvailable: 1 on a SINGLE-replica Deployment blocks node
+drains (the pod can never be evicted), which is worse than the drain. Turn it
+on once caddy.replicas >= 2; with minAvailable 1 that keeps one Ready pod
+during a drain.
+
+Only caddy gets one: pocketbase is one replica, so a PDB on it would either
+block every drain or do nothing, and it has Retain / Retain on its claim.
+*/}}
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "c11n.fullname" . }}-caddy
+  labels:
+    {{- include "c11n.componentLabels" (dict "root" . "component" "caddy") | nindent 4 }}
+spec:
+  {{- if .Values.caddy.pdb.minAvailable }}
+  minAvailable: {{ .Values.caddy.pdb.minAvailable }}
+  {{- else if .Values.caddy.pdb.maxUnavailable }}
+  maxUnavailable: {{ .Values.caddy.pdb.maxUnavailable }}
+  {{- else }}
+  minAvailable: 1
+  {{- end }}
+  selector:
+    matchLabels:
+      {{- include "c11n.componentSelector" (dict "root" . "component" "caddy") | nindent 6 }}
+{{- end }}

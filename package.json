@@ -16,6 +16,8 @@
     "check:pins": "node scripts/check-pins.mjs",
     "check:rule-floor": "node scripts/check-rule-floor.mjs",
     "check:migrations": "node scripts/check-migrations.mjs",
-    "check:env": "node scripts/check-env-validation.mjs"
+    "check:env": "node scripts/check-env-validation.mjs",
+    "check:chart": "node scripts/check-chart.mjs",
+    "check:backups": "node scripts/check-backups.mjs"
   }
 }

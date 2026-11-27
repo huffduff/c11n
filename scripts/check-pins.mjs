@@ -93,6 +93,48 @@ function codeLines(text) {
   // The builder must not resolve a moving tag.
   check(!/FROM caddy:2-builder/.test(dockerfile), 'caddy builder does not use the moving 2-builder tag')
   check(!/FROM caddy:2\b/.test(dockerfile), 'caddy runtime does not use the moving 2 tag')
+
+  // The overlay build stage pins node to .tool-versions, so the bundle in the
+  // image is built by the same node the repo and CI use.
+  const nodePin = read('.tool-versions').match(/^nodejs (\S+)$/m)?.[1] ?? ''
+  check(/^\d+\.\d+\.\d+$/.test(nodePin), `.tool-versions pins an exact nodejs version (got '${nodePin}')`)
+  check(new RegExp(`^ARG NODE_VERSION=${nodePin.replace(/\./g, '\\.')}$`, 'm').test(dockerfile), `caddy Dockerfile pins ARG NODE_VERSION=${nodePin}`)
+  check(dockerfile.includes('FROM node:${NODE_VERSION}-alpine AS overlay'), 'caddy overlay stage takes ${NODE_VERSION}')
+  check(!/FROM node:\d/.test(dockerfile), 'caddy overlay stage does not hardcode a node tag')
+
+  // Everything the runtime stage must carry, and the non-root contract.
+  check(dockerfile.includes('COPY --from=overlay /src/packages/overlay/dist /srv/overlay'), 'caddy image bakes the overlay bundle')
+  check(dockerfile.includes('COPY packages/signin /srv/signin'), 'caddy image bakes the sign-in page')
+  check(dockerfile.includes('COPY deploy/Caddyfile /etc/caddy/Caddyfile'), 'caddy image bakes the Caddyfile')
+  check(/^USER 65532:65532$/m.test(dockerfile), 'caddy image runs as uid 65532')
+  check(/^EXPOSE 8080$/m.test(dockerfile), 'caddy image listens on 8080 (not a privileged port)')
+
+  // The official caddy image ships /usr/bin/caddy with a FILE CAPABILITY
+  // (`setcap cap_net_bind_service=+ep`). A pod with capabilities.drop=[ALL]
+  // and allowPrivilegeEscalation=false cannot exec such a binary: execve(2)
+  // returns EPERM and the container dies with
+  // "exec /usr/bin/caddy: operation not permitted" (seen on k3s). The final
+  // stage must strip the cap AND assert the result at build time, so a base
+  // image change fails the build rather than crash-looping a pod.
+  check(
+    codeLines(dockerfile).includes('setcap -r /usr/bin/caddy'),
+    'caddy image strips the file capability from /usr/bin/caddy',
+  )
+  check(
+    /getcap \/usr\/bin\/caddy/.test(codeLines(dockerfile)),
+    'caddy image asserts /usr/bin/caddy carries no file capabilities at build time',
+  )
+
+  // The build context is the repo root, so .dockerignore decides what the
+  // COPYs can see. Excluding any of them turns into a broken `docker build`.
+  const dockerignore = read('.dockerignore')
+  for (const keep of ['packages/overlay', 'packages/signin', 'deploy', 'package.json', 'package-lock.json']) {
+    const excluded = dockerignore
+      .split('\n')
+      .map((line) => line.trim())
+      .some((line) => line !== '' && !line.startsWith('#') && !line.startsWith('!') && (line === keep || line === `/${keep}`))
+    check(!excluded, `.dockerignore does not exclude ${keep}`)
+  }
 }
 
 // ---- deploy/pocketbase/Dockerfile -----------------------------------------
@@ -112,6 +154,50 @@ function codeLines(text) {
   check(codeLines(dockerfile).includes('sha256sum -c'), 'pocketbase verifies the download against the checksum (not just in a comment)')
   // alpine must be a patch tag: `3.20` is re-pointed on every patch release.
   check(/^FROM alpine:\d+\.\d+\.\d+$/m.test(dockerfile), 'pocketbase base image is a patch tag')
+  // Non-root contract: numeric uid, a pre-created data dir, and the volume
+  // path the chart mounts.
+  check(/^USER 65532:65532$/m.test(dockerfile), 'pocketbase image runs as uid 65532')
+  // Ownership is established where the bytes land, not by a later `chown -R`
+  // that a COPY would undo: the binary, migrations and hooks are COPYd with
+  // --chown, and the one writable directory is chowned explicitly.
+  check(
+    /^COPY --from=fetch --chown=65532:65532 \/out\/pocketbase \/pb\/pocketbase$/m.test(dockerfile),
+    'pocketbase binary is COPYd with --chown=65532',
+  )
+  check(
+    /^COPY --chown=65532:65532 pb_migrations \/pb\/pb_migrations$/m.test(dockerfile),
+    'pocketbase migrations are COPYd with --chown=65532',
+  )
+  check(
+    /^COPY --chown=65532:65532 pb_hooks \/pb\/pb_hooks$/m.test(dockerfile),
+    'pocketbase hooks are COPYd with --chown=65532',
+  )
+  check(codeLines(dockerfile).includes('chown 65532:65532 /pb/pb_data'), 'pocketbase owns the data dir')
+  // unzip is a download-stage tool only: it does not ship. (wget is busybox's,
+  // so the runbook's `kubectl exec … -- wget` still works in the runtime image.)
+  const runtimeStage = dockerfile.slice(dockerfile.lastIndexOf('FROM alpine:'))
+  check(!/apk add[^\n]*unzip/.test(runtimeStage), 'unzip is not installed in the runtime stage')
+  check(dockerfile.includes('--dir=/pb/pb_data'), 'pocketbase stores data at /pb/pb_data')
+  check(/^EXPOSE 8090$/m.test(dockerfile), 'pocketbase exposes 8090')
+
+  // Kubernetes REPLACES the image CMD with a container's `args` and keeps the
+  // ENTRYPOINT. With only CMD ["/pb/pocketbase", "serve", …], the chart's
+  // `args: [serve, …]` made the kubelet exec `serve` and the pod died with
+  // `exec: "serve": executable file not found in $PATH` on k3s. The binary
+  // must be the ENTRYPOINT, with the default arguments in CMD so `docker run`
+  // and docker-compose.yml (which set no command) still work.
+  check(
+    /^ENTRYPOINT \["\/pb\/pocketbase"\]$/m.test(dockerfile),
+    'pocketbase image has ENTRYPOINT /pb/pocketbase (so k8s args are arguments, not the program)',
+  )
+  check(
+    /^CMD \["serve",/m.test(dockerfile),
+    'pocketbase CMD is the default `serve` argument list (no binary in it)',
+  )
+  check(
+    !/^CMD \["\/pb\/pocketbase"/m.test(dockerfile),
+    'pocketbase CMD does not name the binary (that is the ENTRYPOINT)',
+  )
 }
 
 // ---- scripts/tools.env -----------------------------------------------------

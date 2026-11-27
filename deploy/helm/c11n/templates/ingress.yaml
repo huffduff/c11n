@@ -1,0 +1,39 @@
+{{- include "c11n.validate" . }}
+{{- $annotations := deepCopy (.Values.ingress.annotations | default dict) }}
+{{- if eq .Values.tls.mode "certManager" }}
+{{- $_ := set $annotations "cert-manager.io/cluster-issuer" .Values.tls.issuer }}
+{{- end }}
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ include "c11n.fullname" . }}
+  labels:
+    {{- include "c11n.labels" . | nindent 4 }}
+  {{- with $annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  {{- with .Values.ingress.className }}
+  ingressClassName: {{ . | quote }}
+  {{- end }}
+  rules:
+    - host: {{ .Values.host | quote }}
+      http:
+        paths:
+          # Everything goes to caddy. It gates, injects the overlay, proxies
+          # the reviewed upstream, and answers the PocketBase admin path with
+          # 404 - there is no host-level split between admin and review.
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ include "c11n.fullname" . }}-caddy
+                port:
+                  name: http
+  {{- if ne .Values.tls.mode "none" }}
+  tls:
+    - hosts:
+        - {{ .Values.host | quote }}
+      secretName: {{ include "c11n.tlsSecretName" . | quote }}
+  {{- end }}

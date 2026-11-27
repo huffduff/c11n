@@ -1,0 +1,174 @@
+# Running the Playwright suite against a real deployment
+
+Phase 5 task 5.5. The suite normally starts its own native stack
+(`scripts/stack.sh`) and talks to `127.0.0.1:18080`. **External mode** points it
+at an existing deployment instead — in practice the closedcloud test cluster
+after `scripts/cluster/install-closedcloud.sh` — with no stack started, torn
+down or wiped.
+
+```
+C11N_E2E_EXTERNAL=1 \
+C11N_E2E_ALLOW_DESTRUCTIVE=1 \
+C11N_E2E_BASE_URL=http://127.0.0.1:18080 \
+C11N_E2E_PB_URL=http://127.0.0.1:18090 \
+C11N_E2E_SU_EMAIL=e2e-su@c11n.test \
+C11N_E2E_SU_PASSWORD=<a-long-e2e-password> \
+C11N_FIXTURE=go \
+npx -w e2e playwright test
+```
+
+`C11N_E2E_ALLOW_DESTRUCTIVE=1` is required: the suite deletes every comment and
+reply (`resetData`) and creates users in whatever it points at, so external mode
+will not start without it. In addition it refuses to start unless **both**
+`C11N_E2E_BASE_URL` and `C11N_E2E_PB_URL` are loopback (`127.0.0.1`,
+`localhost`, `::1` — the port-forward above) or end in `.closedcloud.test`. For
+a test cluster behind any other name, add
+`C11N_E2E_I_KNOW_THIS_IS_NOT_PRODUCTION=1`; a real client's review site is never
+a target.
+
+`C11N_FIXTURE=go` is not strictly required (external mode defaults to `go`), but
+saying it out loud documents the assumption: the install deploys the Go demo
+server, so the `go` topology specs apply.
+
+## 1. Prerequisites
+
+- The release is installed **for these tests**:
+
+  ```
+  E2E_PORT_FORWARD=1 scripts/cluster/install-closedcloud.sh
+  ```
+
+  That mode sets `publicUrl=http://127.0.0.1:18080` and `cookie.secure=true`.
+  Both are required, and both are easy to get wrong:
+
+  - The claim's CSRF check compares the browser's `Origin` to the release's
+    `publicUrl` (`C11N_PUBLIC_URL`). Installed for the Traefik hostname, every
+    sign-in through the port-forward is refused with 403
+    `cross-origin claim refused` — correct behaviour, wrong configuration.
+  - `cookie.secure=false` (the normal plain-http install) makes
+    `identity.spec.ts` fail its `Secure` cookie assertion. `127.0.0.1` is a
+    secure context for Chromium, so a Secure cookie works over the
+    port-forward; the Traefik hostname on plain http is what needs
+    `cookie.secure=false`.
+
+  If you already installed the normal way, re-run with `E2E_PORT_FORWARD=1`
+  (the pocketbase pod restarts, because `C11N_PUBLIC_URL` is read at boot).
+- `kubectl` reaches the cluster (`KUBECONFIG` set) and the release is `c11n` in
+  namespace `default` (override below if not).
+
+## 2. A superuser for the fixtures
+
+The specs create users and read invite rows as a superuser: public signup is
+closed and password auth is off for `users`, so the fixtures need the one
+account that can do both. It has nothing to do with the owner's account.
+
+```
+kubectl exec statefulset/c11n-pocketbase -c pocketbase -- \
+  /pb/pocketbase superuser upsert e2e-su@c11n.test 'a-long-e2e-password' --dir=/pb/pb_data
+```
+
+`--dir` is required because the container's default data dir is set by the CMD's
+flag, not by the executable. Re-run the command to rotate the password; it
+upserts. `-c pocketbase` is needed on a resource reference; the pod is
+`c11n-pocketbase-0` if you prefer `kubectl exec c11n-pocketbase-0 -- …`.
+
+## 3. Reach the two origins
+
+Two different origins are needed, because the fixtures talk to PocketBase
+**directly** for seeding: the superuser API must not go through the proxy under
+test (the proxy overwrites Authorization with the session cookie, by design).
+
+They are two different objects now (a Deployment for the proxy, a Service for the
+database), so it is two commands, in two shells. Use the wrapper, not a bare
+`kubectl port-forward`: a rollout replaces the pod the forward is pinned to and
+the plain command dies with `failed to find sandbox`, failing the run half way
+through. The wrapper restarts it with a 1 s backoff:
+
+```
+scripts/cluster/port-forward.sh deploy/c11n-caddy 18080:8080
+scripts/cluster/port-forward.sh svc/c11n-pocketbase 18090:8090
+```
+
+`NAMESPACE=<ns>` overrides the namespace (default `default`, matching the
+install script); `LOG=<file>` sends kubectl's output somewhere (default
+`${TMPDIR:-/tmp}/c11n-port-forward-<port>.log`); extra arguments after the two
+positionals are passed to `kubectl port-forward` (e.g. `--address 0.0.0.0`).
+
+- `18080` → Caddy: the review origin, the same port the local stack uses, so
+  `C11N_E2E_BASE_URL=http://127.0.0.1:18080` and any invite link the install
+  prints work unchanged.
+- `18090` → the pocketbase Service: `C11N_E2E_PB_URL=http://127.0.0.1:18090`.
+
+Keep both running in their own shells; the suite does not manage them.
+
+The chart's NetworkPolicy is on by default. It does not restrict caddy's egress
+or pocketbase's ingress from caddy, but `kubectl port-forward` arrives from the
+kubelet and whether a CNI applies policy to that traffic varies. If one of the
+two hangs, add the node subnet to `networkPolicy.additionalAllowedCidrs`, or
+re-install with `scripts/cluster/install-closedcloud.sh NETWORK_POLICY=0`.
+
+**Ingress, not port-forward:** on k3s/closedcloud Traefik runs with
+`hostNetwork: true`, so it has no pod IP and the chart's `namespaceSelector`
+cannot match it — the caddy policy 502s every request with both pods Ready.
+`install-closedcloud.sh` detects this and admits, per node, the InternalIP plus
+the podCIDR network and `.1` addresses as `/32`s (on flannel the traffic arrives
+from those, not from the InternalIP). If you install by hand, see runbook §9.
+
+### Why a port-forward and not the Traefik hostname
+
+Traefik routes by the `Host` header, and a browser navigation always sends the
+host from the URL — `extraHTTPHeaders` cannot change it. Two workable routes:
+
+1. **Port-forward (recommended).** No DNS, no host mapping, and
+   `127.0.0.1` is a secure context, so cookie behaviour matches the local stack.
+2. **Host mapping.** Add `--host-resolver-rules="MAP c11n.closedcloud.test
+   <cluster address>"` to Chromium's launch args (a `launchOptions.args` entry
+   in `e2e/playwright.config.ts`) and use `C11N_E2E_BASE_URL=http://c11n.closedcloud.test:80`.
+   This needs `cookie.secure=false` on the release (the install script sets it)
+   and a resolver rule per host, including the admin host if you use it.
+   Nothing in this repo implements that today: it is the documented alternative,
+   not the supported path.
+
+## 4. What skips in external mode, and why
+
+Nothing in the suite is silently weakened: every exclusion is a `test.skip`
+with a reason, and the rest of the file still runs.
+
+| Spec | Skips | Because |
+|---|---|---|
+| `identity.spec` "3.2 bootstrap owner" | whole describe | the one-time link is on the pocketbase pod's stdout; read it with `kubectl logs statefulset/c11n-pocketbase -c pocketbase \| grep 'c11n bootstrap'` |
+| `token-logs.spec` | whole file | reads the local stack log for the bootstrap token |
+| `smoke.spec` "Caddyfile env matrix" | whole describe | needs `CADDY_BIN` (native `caddy validate`); the cluster runs the same file baked into the image |
+| `topology.spec` "gzip-accepting HTML request" | the direct-upstream half | talks to `127.0.0.1:15174`, the local fixture port; the in-cluster upstream has no published port |
+| `phase3-exit.spec` | nothing | it mints a fresh owner link instead of reading the bootstrap log |
+
+`globalSetup` in external mode validates the environment, probes both URLs (the
+sign-in page on the proxy, `/api/health` on PocketBase), and then runs an origin
+preflight: a `POST /__c11n/auth/claim` with a bogus token and `Origin` set to
+`C11N_E2E_BASE_URL` (`e2e/origin-preflight.ts`). A 410 means the origin was
+accepted; a 403 `cross-origin claim refused` fails the run immediately with one
+message naming the base URL and `publicUrl`. It is non-destructive: the token
+is not a real invite. So a typo'd URL or a release installed for the wrong
+`publicUrl` fails in one second, not as forty spec failures.
+`globalTeardown` does nothing.
+
+## 5. Caveats
+
+- **The suite writes to the deployment.** It creates users (`e2e-*@c11n.test`,
+  `client-*@example.test`), comments and replies, and `resetData()` deletes
+  every comment/reply before several specs. That is fine on a disposable test
+  cluster; never point external mode at a real client's review site. Three keys
+  enforce that: `C11N_E2E_ALLOW_DESTRUCTIVE=1` is mandatory, both origins must
+  be loopback or `*.closedcloud.test`, and any other hostname additionally needs
+  `C11N_E2E_I_KNOW_THIS_IS_NOT_PRODUCTION=1`. `globalSetup` and `resetData()`
+  both refuse, with the reason in the message (`e2e/external-guard.ts`).
+- The overlay is the one baked into the Caddy image. If you changed the overlay
+  locally, rebuild and reinstall — building `packages/overlay/dist` here proves
+  nothing about the running pod.
+- Suppose the release was installed for its Traefik hostname (`publicUrl=
+  http://c11n.closedcloud.test`) and you port-forward instead. Sign-ins fail
+  with 403 `cross-origin claim refused`, and `identity.spec` expects a Secure
+  cookie the release is not setting. Re-install with `E2E_PORT_FORWARD=1` (see
+  §1); the preflight now catches the origin half of this before the suite runs.
+- One worker, one deployment: the specs assert on global row sets
+  (`fullyParallel: false`, `workers: 1`).

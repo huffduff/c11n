@@ -9,6 +9,7 @@
 import { request, type APIRequestContext, type Page } from '@playwright/test'
 import fs from 'node:fs'
 import path from 'node:path'
+import { destructiveRefusal } from './external-guard'
 
 export interface Creds {
   email: string
@@ -51,8 +52,40 @@ const repoRoot = path.resolve(__dirname, '..')
 const credsPath = process.env.C11N_CREDS ?? path.join(repoRoot, '.stack', 'creds.json')
 const stateDir = process.env.C11N_STACK_DIR ?? path.join(repoRoot, '.stack')
 
+/**
+ * EXTERNAL MODE (Phase 5 task 5.5): run this suite against a REAL deployment
+ * (the closedcloud cluster) instead of a stack scripts/stack.sh started here.
+ *
+ * Set C11N_E2E_EXTERNAL=1 plus:
+ *   C11N_E2E_BASE_URL   the proxy's origin (port-forward, see the docs)
+ *   C11N_E2E_PB_URL     PocketBase's direct API origin (a second port-forward:
+ *                       the superuser helpers bypass the proxy on purpose)
+ *   C11N_E2E_SU_EMAIL / C11N_E2E_SU_PASSWORD  a superuser in that deployment
+ *
+ * There is no local stack, so everything that reads a local log or wipes
+ * local state is skipped: the fixtures throw, and the specs that depend on
+ * the bootstrap log or a native Caddy binary skip themselves.
+ */
+export const EXTERNAL = process.env.C11N_E2E_EXTERNAL === '1'
+
+function needEnv(name: string): string {
+  const value = process.env[name]
+  if (!value) {
+    throw new Error(
+      `C11N_E2E_EXTERNAL=1 needs ${name}. See scripts/cluster/e2e-against-ingress.md.`,
+    )
+  }
+  return value.replace(/\/+$/, '')
+}
+
 /** Raw text of a stack service log (`.stack/<name>.log`), '' when missing. */
 export function stackLog(name: 'pocketbase' | 'caddy' | 'demo'): string {
+  if (EXTERNAL) {
+    throw new Error(
+      `stackLog(${name}) is local-stack only. In external mode read the pod log: ` +
+        `kubectl logs statefulset/c11n-pocketbase -c pocketbase`,
+    )
+  }
   try {
     return fs.readFileSync(path.join(stateDir, `${name}.log`), 'utf8')
   } catch {
@@ -74,6 +107,12 @@ export interface BootstrapInvite {
  * regexes it also proves the operator can actually find it.
  */
 export function bootstrapInviteLink(): BootstrapInvite {
+  if (EXTERNAL) {
+    throw new Error(
+      'the bootstrap link lives in the cluster log, not here: ' +
+        "kubectl logs statefulset/c11n-pocketbase -c pocketbase | grep 'c11n bootstrap' (docs/runbook.md)",
+    )
+  }
   const match = stackLog('pocketbase').match(
     /c11n bootstrap: owner invite for (\S+) \(single use, expires in (\d+)h\): (\S+)/,
   )
@@ -85,6 +124,14 @@ export function bootstrapInviteLink(): BootstrapInvite {
 }
 
 export function readCreds(): Creds {
+  if (EXTERNAL) {
+    return {
+      email: needEnv('C11N_E2E_SU_EMAIL'),
+      password: needEnv('C11N_E2E_SU_PASSWORD'),
+      pbUrl: needEnv('C11N_E2E_PB_URL'),
+      baseUrl: needEnv('C11N_E2E_BASE_URL'),
+    }
+  }
   return JSON.parse(fs.readFileSync(credsPath, 'utf8')) as Creds
 }
 
@@ -271,6 +318,12 @@ async function allRecords(collection: string): Promise<Array<{ id: string }>> {
  * seq 1, which several specs assert on.
  */
 export async function resetData(): Promise<void> {
+  // Second gate, at the point of deletion: external mode may only wipe a
+  // deployment the operator confirmed is disposable (e2e/external-guard.ts).
+  // globalSetup checks this too; this is the one that runs next to the DELETE.
+  const refusal = destructiveRefusal()
+  if (refusal) throw new Error(`resetData: ${refusal}`)
+
   const creds = readCreds()
   const headers = { authorization: await superuserTokenFor() }
   for (const collection of ['replies', 'comments', 'comment_counters']) {
@@ -420,6 +473,24 @@ export async function signInAs(page: Page, email?: string, role: Role = 'client'
   const link = await magicLinkFor(user.email, (user.role as Role) ?? role)
   await openMagicLinkInPage(page, link)
   return { user, link }
+}
+
+/**
+ * Add `latencyMs` of round-trip to everything the page sends to PocketBase
+ * through the proxy — the overlay's own API prefix, API calls and the realtime
+ * SSE alike. Real reviewers are always remote and the local stack answers in
+ * ~1 ms, which is fast enough to hide request-ordering bugs; specs that care
+ * about them opt in here (see specs/latency.spec.ts).
+ *
+ * A route, not CDP `Network.emulateNetworkConditions`: only the overlay's
+ * traffic is slowed, so the reviewed page and the vite dev server keep their
+ * timing and a run stays quick.
+ */
+export async function withPbLatency(page: Page, latencyMs = 300): Promise<void> {
+  await page.route('**/__c11n/pb/**', async (route) => {
+    await new Promise((resolve) => setTimeout(resolve, latencyMs))
+    await route.continue()
+  })
 }
 
 /**

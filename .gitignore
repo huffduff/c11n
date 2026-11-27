@@ -33,6 +33,9 @@ Thumbs.db
 # Local native stack state (scripts/stack.sh)
 .stack/
 
+# CI's sasser-studios checkout (actions/checkout path: .stack-sasser)
+.stack-sasser/
+
 # Playwright outputs (e2e)
 e2e/test-results/
 e2e/playwright-report/

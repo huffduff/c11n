@@ -37,7 +37,8 @@ specs:
 `stack.sh` builds the SPA and the Go binary into `.stack/` for the `go`
 fixture. Upstreams are otherwise interchangeable: Caddy's config is identical,
 and `specs/topology.spec.ts` holds the specs that only make sense for one side
-(each skips on the other). CI runs the matrix over both demo fixtures.
+(each skips on the other). CI runs the matrix over both demo fixtures, plus a
+separate `e2e (sasser)` job for this one.
 
 Spec selection for `sasser` is `testMatch` in `playwright.config.ts`, not
 per-spec skips: the demo specs drive demo-vue's own DOM (`#hero-title`,
@@ -89,6 +90,31 @@ npm run e2e:sasser
 - `down` stops the vite process by pidfile, by process group; the marker check
   carries `--port 15175`, so no unrelated vite on the box can be adopted or
   killed.
+
+### CI (`e2e (sasser)`)
+
+`.github/workflows/ci.yml` runs this fixture as its own job, `e2e (sasser)` —
+not a third value in the `e2e` matrix, so the deploy key never reaches the
+`vite` and `go` runners. In order:
+
+- a step reads `SASSER_REF` out of `scripts/tools.env` into a step output: the
+  sha is never duplicated in the workflow, so bumping the pin moves the
+  checkout and the fixture's HEAD assertion together;
+- a step exports `secrets.SASSER_DEPLOY_KEY` and publishes `has_key`, because a
+  secret cannot be referenced from an `if:`. Every later step is gated on it;
+- `actions/checkout` checks `huffduff/sasser-studios` out at that sha with
+  `ssh-key` (read-only deploy key "c11n CI (read-only)", which only this job
+  reads) and `persist-credentials: false`, into `.stack-sasser/` — outside the
+  npm workspace patterns, gitignored, and not globbed by any test or check;
+- a step asserts that checkout's HEAD really is `SASSER_REF` and logs the
+  commit subject, so the run's log is evidence about the pin;
+- `C11N_SASSER_DIR` points at `.stack-sasser/`; `stack.sh` does the `npm ci`
+  and the vite dev server as it does locally.
+
+Without the secret (a `pull_request` from a fork) the job succeeds having done
+nothing: a `::notice::` and a job-summary line say the probe did not run, and
+the leg is not counted as evidence. Node is c11n's pin from `.tool-versions`;
+sasser's own `.tool-versions` is not read.
 
 
 `fetch-tools.sh` builds Caddy with xcaddy (needs `go`, pinned in

@@ -1,12 +1,17 @@
 # c11n CI
 #
-# Three independent jobs:
+# Four independent jobs:
 #   - overlay: typecheck, build, and test the Vue overlay bundle; checks the
 #     S4 supply-chain pins (scripts/check-pins.mjs); uploads the built
 #     overlay.js as an artifact. Also lints the workflows.
 #   - e2e:     the real verification. Runs the whole Playwright suite against
 #     the full stack (PocketBase + Caddy + a demo upstream) on two
 #     fixtures: `vite` (dev server) and `go` (the production topology).
+#   - sasser:  the same proxy in front of the real dogfood app (ADR 0009),
+#     huffduff/sasser-studios at the SASSER_REF pin, running only the
+#     compatibility probe. Needs a read-only deploy key (secret
+#     SASSER_DEPLOY_KEY) to check that private repo out; skipped with a
+#     notice when the secret is absent (pull_request from a fork).
 #   - docker:  smoke-builds both deploy images (deploy/caddy, deploy/pocketbase).
 #     It only proves the Dockerfiles build — no container is run, so treat a
 #     green docker job as "the images compile", not "the deployment works".
@@ -18,7 +23,8 @@ on:
     branches: [main]
   pull_request:
 
-# Least privilege: nothing here writes to the repo or reads secrets.
+# Least privilege: nothing here writes to the repo. One secret is read: the
+# sasser job's read-only deploy key (SASSER_DEPLOY_KEY), and only by that job.
 permissions:
   contents: read
 
@@ -167,6 +173,154 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: playwright-${{ matrix.fixture }}
+          path: |
+            e2e/playwright-report
+            e2e/test-results
+            .stack/*.log
+          if-no-files-found: ignore
+
+  # The dogfood leg (ADR 0009): the same proxy in front of the real client app,
+  # sasser-studios `frontend/` in Vite dev mode, running only the compatibility
+  # probe (e2e/specs/upstream-compat.spec.ts, 8 tests).
+  #
+  # A job of its own, not a third matrix value in `e2e`: the checkout needs the
+  # private repo's deploy key, and a matrix would put that secret in the
+  # environment of the vite and go runners too. Separate jobs also keep the
+  # matrix's name pattern: this one is `e2e (sasser)` by hand.
+  #
+  # The fixture-independent scratch checks (rule floor, migrations up/down, env
+  # validation, backups) are deliberately not repeated here: they run on both
+  # demo legs already and touch nothing sasser-specific.
+  sasser:
+    name: e2e (sasser)
+    runs-on: blacksmith-2vcpu-ubuntu-2404
+    timeout-minutes: 25
+    env:
+      C11N_FIXTURE: sasser
+      # scripts/stack.sh reads this instead of cloning the private repo itself;
+      # it also refuses the run unless that checkout's HEAD is SASSER_REF and
+      # its tracked files are clean.
+      C11N_SASSER_DIR: ${{ github.workspace }}/.stack-sasser
+    steps:
+      - uses: actions/checkout@v7
+
+      # SASSER_REF is read, never copied: the sha lives in scripts/tools.env
+      # only, so bumping it there moves the checkout and the fixture's HEAD
+      # assertion at the same time.
+      - name: Read the pinned sasser commit
+        id: pin
+        run: |
+          ref="$(awk -F= '$1 == "SASSER_REF" { print $2 }' scripts/tools.env)"
+          if [ -z "$ref" ]; then
+            echo "::error::SASSER_REF is missing from scripts/tools.env"
+            exit 1
+          fi
+          echo "ref=$ref" >> "$GITHUB_OUTPUT"
+
+      # A secret cannot be referenced from an `if:`, so its presence is decided
+      # here and every step that needs it is gated on `has_key`. Forks get no
+      # secrets on pull_request, hence the skip-with-notice instead of a red
+      # job the contributor cannot fix.
+      - name: Check for the sasser deploy key
+        id: key
+        env:
+          SASSER_DEPLOY_KEY: ${{ secrets.SASSER_DEPLOY_KEY }}
+        run: |
+          if [ -n "$SASSER_DEPLOY_KEY" ]; then
+            echo "has_key=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_key=false" >> "$GITHUB_OUTPUT"
+            echo "::notice title=e2e (sasser) skipped::SASSER_DEPLOY_KEY is not available to this run; the sasser compatibility probe did not run."
+            {
+              echo "### e2e (sasser): skipped"
+              echo ""
+              echo "\`SASSER_DEPLOY_KEY\` is not available to this run (expected on \`pull_request\` from a fork),"
+              echo "so the private sasser-studios checkout was skipped and the compatibility probe did not run."
+              echo "The \`vite\` and \`go\` legs still cover the proxy; this leg is not evidence about the dogfood app."
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      # Checked out at the repo root's sibling path, outside every npm workspace
+      # pattern (packages/*, examples/*, e2e) and gitignored, so no c11n tool
+      # (vitest, tsc, a check script) globs into the client's tree.
+      # persist-credentials is off: the job never pushes, and the deploy key
+      # must not stay behind in .git/config.
+      - name: Check out sasser-studios at the pinned commit
+        if: steps.key.outputs.has_key == 'true'
+        uses: actions/checkout@v7
+        with:
+          repository: huffduff/sasser-studios
+          ref: ${{ steps.pin.outputs.ref }}
+          ssh-key: ${{ secrets.SASSER_DEPLOY_KEY }}
+          persist-credentials: false
+          path: .stack-sasser
+
+      # Belt and braces with stack.sh's own check: the log line is the evidence
+      # that the probe ran against exactly the pinned commit.
+      - name: Verify the sasser checkout is at SASSER_REF
+        if: steps.key.outputs.has_key == 'true'
+        run: |
+          head="$(git -C .stack-sasser rev-parse HEAD)"
+          if [ "$head" != "${{ steps.pin.outputs.ref }}" ]; then
+            echo "::error::sasser-studios is at $head, expected ${{ steps.pin.outputs.ref }}"
+            exit 1
+          fi
+          echo "sasser-studios @ $head"
+          git -C .stack-sasser log -1 --format='%s'
+
+      - uses: actions/setup-node@v7
+        if: steps.key.outputs.has_key == 'true'
+        with:
+          node-version-file: .tool-versions
+          cache: npm
+          # c11n's lockfile only: setup-node fails when a listed path does not
+          # resolve, and .stack-sasser/ is absent on the skipped run. The cache
+          # it configures is ~/.npm, which is the same cache the checkout's
+          # `npm ci` (run by stack.sh) writes to, so sasser's tarballs are
+          # restored too — just keyed on c11n's dependencies.
+          cache-dependency-path: package-lock.json
+
+      # xcaddy builds Caddy, so this leg needs the pinned go as well.
+      - uses: actions/setup-go@v7
+        if: steps.key.outputs.has_key == 'true'
+        with:
+          go-version-file: .tool-versions
+          cache: false
+
+      - uses: actions/cache@v6
+        if: steps.key.outputs.has_key == 'true'
+        with:
+          path: .tools
+          key: tools-${{ runner.os }}-${{ hashFiles('scripts/tools.env') }}
+
+      - name: Fetch pinned native tools
+        if: steps.key.outputs.has_key == 'true'
+        run: scripts/fetch-tools.sh
+
+      - name: Install dependencies
+        if: steps.key.outputs.has_key == 'true'
+        run: npm ci
+
+      - name: Install Chromium
+        if: steps.key.outputs.has_key == 'true'
+        run: npx -w e2e playwright install --with-deps chromium
+
+      - name: Build overlay bundle
+        if: steps.key.outputs.has_key == 'true'
+        run: npm run build
+
+      # stack.sh's sasser_install_deps runs `npm ci` in the checkout root on
+      # first use (frontend/ is that repo's npm workspace) and starts its vite
+      # dev server on c11n's node.
+      - name: Run the sasser compatibility probe
+        if: steps.key.outputs.has_key == 'true'
+        run: npm test -w e2e
+
+      - name: Upload Playwright artifacts
+        if: failure() && steps.key.outputs.has_key == 'true'
+        uses: actions/upload-artifact@v7
+        with:
+          name: playwright-sasser
           path: |
             e2e/playwright-report
             e2e/test-results

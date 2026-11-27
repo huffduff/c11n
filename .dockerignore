@@ -15,6 +15,9 @@ node_modules
 # Pinned native binaries and local stack state
 .tools
 .stack
+# CI's sasser-studios checkout (the sasser job's git fetch lands here); it is a
+# private repo, so never let it into a build context.
+.stack-sasser
 
 # Test output
 e2e/test-results

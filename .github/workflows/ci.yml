@@ -1,12 +1,17 @@
 # c11n CI
 #
-# Three independent jobs:
+# Four independent jobs:
 #   - overlay: typecheck, build, and test the Vue overlay bundle; checks the
 #     S4 supply-chain pins (scripts/check-pins.mjs); uploads the built
 #     overlay.js as an artifact. Also lints the workflows.
 #   - e2e:     the real verification. Runs the whole Playwright suite against
 #     the full stack (PocketBase + Caddy + a demo upstream) on two
 #     fixtures: `vite` (dev server) and `go` (the production topology).
+#   - sasser:  the same proxy in front of the real dogfood app (ADR 0009),
+#     huffduff/sasser-studios at the SASSER_REF pin, running only the
+#     compatibility probe. Needs a read-only deploy key (secret
+#     SASSER_DEPLOY_KEY) to check that private repo out; skipped with a
+#     notice when the secret is absent (pull_request from a fork).
 #   - docker:  smoke-builds both deploy images (deploy/caddy, deploy/pocketbase).
 #     It only proves the Dockerfiles build — no container is run, so treat a
 #     green docker job as "the images compile", not "the deployment works".
@@ -18,7 +23,8 @@ on:
     branches: [main]
   pull_request:
 
-# Least privilege: nothing here writes to the repo or reads secrets.
+# Least privilege: nothing here writes to the repo. One secret is read: the
+# sasser job's read-only deploy key (SASSER_DEPLOY_KEY), and only by that job.
 permissions:
   contents: read
 
@@ -172,6 +178,241 @@ jobs:
             e2e/test-results
             .stack/*.log
           if-no-files-found: ignore
+
+  # The dogfood leg (ADR 0009): the same proxy in front of the real client app,
+  # sasser-studios `frontend/` in Vite dev mode, running only the compatibility
+  # probe (e2e/specs/upstream-compat.spec.ts, 8 tests).
+  #
+  # A job of its own, not a third matrix value in `e2e`: the checkout needs the
+  # private repo's deploy key, and a matrix would put that secret in the
+  # environment of the vite and go runners too. Separate jobs also keep the
+  # matrix's name pattern: this one is `e2e (sasser)` by hand.
+  #
+  # The fixture-independent scratch checks (rule floor, migrations up/down, env
+  # validation, backups) are deliberately not repeated here: they run on both
+  # demo legs already and touch nothing sasser-specific.
+  sasser:
+    name: e2e (sasser)
+    runs-on: blacksmith-2vcpu-ubuntu-2404
+    timeout-minutes: 25
+    env:
+      C11N_FIXTURE: sasser
+      # scripts/stack.sh reads this instead of cloning the private repo itself;
+      # it also refuses the run unless that checkout's HEAD is SASSER_REF and
+      # its tracked files are clean.
+      C11N_SASSER_DIR: ${{ github.workspace }}/.stack-sasser
+    steps:
+      - uses: actions/checkout@v7
+
+      # SASSER_REF is read, never copied: the sha lives in scripts/tools.env
+      # only, so bumping it there moves the checkout and the fixture's HEAD
+      # assertion at the same time.
+      #
+      # It is validated, not just parsed: the value reaches a `git fetch` command
+      # line as a revision, so anything other than a full 40-char lowercase hex
+      # sha is refused here (a CRLF checkout is the realistic way a stray \r
+      # arrives, hence the tr; an abbreviated sha or a ref name would make the
+      # checkout depend on the remote's state rather than on the pin).
+      - name: Read the pinned sasser commit
+        id: pin
+        run: |
+          ref="$(awk -F= '$1 == "SASSER_REF" { print $2 }' scripts/tools.env | tr -d '\r')"
+          if [ -z "$ref" ]; then
+            echo "::error::SASSER_REF is missing from scripts/tools.env"
+            exit 1
+          fi
+          if ! printf '%s' "$ref" | grep -Eq '^[0-9a-f]{40}$'; then
+            echo "::error::SASSER_REF is not a full 40-character lowercase commit sha: '$ref'"
+            exit 1
+          fi
+          echo "ref=$ref" >> "$GITHUB_OUTPUT"
+
+      # A secret cannot be referenced from an `if:`, so its presence is decided
+      # here and every step that needs it is gated on `has_key`. Forks get no
+      # secrets on pull_request, hence the skip-with-notice instead of a red
+      # job the contributor cannot fix.
+      - name: Check for the sasser deploy key
+        id: key
+        env:
+          SASSER_DEPLOY_KEY: ${{ secrets.SASSER_DEPLOY_KEY }}
+        run: |
+          if [ -n "$SASSER_DEPLOY_KEY" ]; then
+            echo "has_key=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_key=false" >> "$GITHUB_OUTPUT"
+            echo "::notice title=e2e (sasser) skipped::SASSER_DEPLOY_KEY is not available to this run; the sasser compatibility probe did not run."
+            {
+              echo "### e2e (sasser): skipped"
+              echo ""
+              echo "\`SASSER_DEPLOY_KEY\` is not available to this run (expected on \`pull_request\` from a fork),"
+              echo "so the private sasser-studios checkout was skipped and the compatibility probe did not run."
+              echo "The \`vite\` and \`go\` legs still cover the proxy; this leg is not evidence about the dogfood app."
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      # The deploy key lives for the length of ONE step, and never reaches
+      # .git/config.
+      #
+      # `actions/checkout` with `ssh-key:` would be less code, but it writes the
+      # key to disk and keeps it there until its post-job cleanup, i.e. while
+      # `npm ci` runs (this repo's and sasser's postinstall scripts) and for the
+      # whole test run. A private key readable by anything a dependency's install
+      # script starts is a credential leak waiting to happen.
+      #
+      # So: the key arrives through `env:` scoped to this step only, is written
+      # under $RUNNER_TEMP with umask 077, is used for exactly one fetch, and an
+      # EXIT trap removes it even when the fetch fails. `git init` + fetch BY URL
+      # (no remote is added) + `checkout --detach FETCH_HEAD` leaves nothing in
+      # .stack-sasser/.git/config: no url, no insteadOf, no ssh command.
+      #
+      # Host-key checking stays on: GitHub's published ed25519 key (verified with
+      # `gh api meta --jq .ssh_keys`) is written to a known_hosts file for this
+      # step, and StrictHostKeyChecking=yes means a substituted host fails the
+      # step instead of handing the key to it.
+      #
+      # Checked out at the repo root's sibling path, outside every npm workspace
+      # pattern (packages/*, examples/*, e2e) and gitignored, so no c11n tool
+      # (vitest, tsc, a check script) globs into the client's tree.
+      - name: Check out sasser-studios at the pinned commit
+        if: steps.key.outputs.has_key == 'true'
+        env:
+          # Step-scoped on purpose: at job level the key would be readable by
+          # every later step, `npm ci` included.
+          SASSER_DEPLOY_KEY: ${{ secrets.SASSER_DEPLOY_KEY }}
+          SASSER_REF: ${{ steps.pin.outputs.ref }}
+        run: |
+          set -euo pipefail
+          key="$RUNNER_TEMP/sasser-deploy-key"
+          known_hosts="$RUNNER_TEMP/sasser-known-hosts"
+          trap 'rm -f "$key" "$known_hosts"' EXIT
+          umask 077
+          printf '%s\n' "$SASSER_DEPLOY_KEY" > "$key"
+          printf '%s\n' 'github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl' > "$known_hosts"
+          export GIT_SSH_COMMAND="ssh -i $key -o IdentitiesOnly=yes -o BatchMode=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=$known_hosts"
+          rm -rf .stack-sasser
+          mkdir -p .stack-sasser
+          git -C .stack-sasser init -q
+          # `ssh://` rather than the scp-like `git@github.com:owner/repo.git`:
+          # both mean the same thing, but on this runner image the scp-like form
+          # fails before ssh is even involved ("fatal: 'git@github.com:…' does
+          # not appear to be a git repository", while the same key authenticates
+          # fine via `ssh -T`). The explicit scheme names the transport, so
+          # nothing can mistake it for a local path.
+          sasser_url='ssh://git@github.com/huffduff/sasser-studios.git'
+          if ! git -C .stack-sasser fetch --depth 1 --no-tags "$sasser_url" "$SASSER_REF"; then
+            echo "::error::git fetch of sasser-studios@$SASSER_REF failed; retrying traced for diagnostics"
+            GIT_TRACE=1 git -C .stack-sasser fetch --depth 1 --no-tags "$sasser_url" "$SASSER_REF" 2>&1 | tail -n 40 || true
+            exit 1
+          fi
+          git -C .stack-sasser checkout -q --detach FETCH_HEAD
+          # The EXIT trap covers the failure path; remove the key explicitly here
+          # so this step's own log proves it is gone before anything else runs,
+          # rather than a later step having to trust the trap.
+          rm -f "$key" "$known_hosts"
+          test ! -e "$key"
+          echo "read-only deploy key used for one fetch and removed ($key)"
+
+      # Belt and braces with stack.sh's own check: the log line is the evidence
+      # that the probe ran against exactly the pinned commit.
+      - name: Verify the sasser checkout is at SASSER_REF
+        if: steps.key.outputs.has_key == 'true'
+        env:
+          SASSER_REF: ${{ steps.pin.outputs.ref }}
+        run: |
+          head="$(git -C .stack-sasser rev-parse HEAD)"
+          if [ "$head" != "$SASSER_REF" ]; then
+            echo "::error::sasser-studios is at $head, expected $SASSER_REF"
+            exit 1
+          fi
+          echo "sasser-studios @ $head"
+          git -C .stack-sasser log -1 --format='%s'
+          # ...and the clone carries no credential-bearing configuration.
+          if grep -Eqi 'url|insteadof|sshcommand|extraheader' .stack-sasser/.git/config; then
+            echo "::error::.stack-sasser/.git/config carries a url/credential setting:"
+            sed -E 's/(authorization|password|token).*/\1 <redacted>/I' .stack-sasser/.git/config
+            exit 1
+          fi
+          echo "no remote or credential in .stack-sasser/.git/config"
+
+      - uses: actions/setup-node@v7
+        if: steps.key.outputs.has_key == 'true'
+        with:
+          node-version-file: .tool-versions
+          cache: npm
+          # c11n's lockfile only: setup-node fails when a listed path does not
+          # resolve, and .stack-sasser/ is absent on the skipped run. The cache
+          # it configures is ~/.npm, which is the same cache the checkout's
+          # `npm ci` (run by stack.sh) writes to, so sasser's tarballs are
+          # restored too — just keyed on c11n's dependencies.
+          cache-dependency-path: package-lock.json
+
+      # xcaddy builds Caddy, so this leg needs the pinned go as well.
+      - uses: actions/setup-go@v7
+        if: steps.key.outputs.has_key == 'true'
+        with:
+          go-version-file: .tool-versions
+          cache: false
+
+      - uses: actions/cache@v6
+        if: steps.key.outputs.has_key == 'true'
+        with:
+          path: .tools
+          key: tools-${{ runner.os }}-${{ hashFiles('scripts/tools.env') }}
+
+      - name: Fetch pinned native tools
+        if: steps.key.outputs.has_key == 'true'
+        run: scripts/fetch-tools.sh
+
+      - name: Install dependencies
+        if: steps.key.outputs.has_key == 'true'
+        run: npm ci
+
+      - name: Install Chromium
+        if: steps.key.outputs.has_key == 'true'
+        run: npx -w e2e playwright install --with-deps chromium
+
+      - name: Build overlay bundle
+        if: steps.key.outputs.has_key == 'true'
+        run: npm run build
+
+      # stack.sh's sasser_install_deps runs `npm ci` in the checkout root on
+      # first use (frontend/ is that repo's npm workspace) and starts its vite
+      # dev server on c11n's node.
+      - name: Run the sasser compatibility probe
+        if: steps.key.outputs.has_key == 'true'
+        run: npm test -w e2e
+
+      # NOTHING from Playwright is uploaded here: the sasser fixture is a PRIVATE
+      # app, and a trace, screenshot or video is a recording of its DOM and of
+      # every request the probe made through it. playwright.config.ts turns
+      # `trace` off for this fixture (screenshots and videos are off by default
+      # and nothing enables them), and e2e/test-results + e2e/playwright-report
+      # are left on the runner.
+      #
+      # The stack logs are the only artifact, and only on failure. What they
+      # actually contain was checked against a real run, not assumed:
+      #   caddy.log     server log only — the Caddyfile has no `log` directive,
+      #                 so there is no access log (no cookies, no bodies, no
+      #                 query strings). It does warn once per aborted SSE stream
+      #                 with the request's `uri` path, `host` and `remote_ip`.
+      #   pocketbase.log startup output, INCLUDING the bootstrap owner's
+      #                 invite URL for this one-shot stack. That link mints a
+      #                 session on this runner's now-stopped PocketBase, whose
+      #                 data is wiped at the next `up`; it is dead by the time
+      #                 anyone can read the artifact.
+      #   demo.log / vite.log  the dev server's output. Not purely metadata:
+      #                 a transform/compile error quotes a few lines of the
+      #                 app's source, i.e. a fragment of a private repo.
+      #   sasser-install.log  `npm ci` output (dependency names and versions).
+      # Hence: failure-only, and 7 days rather than kept as a record.
+      - name: Upload the stack logs
+        if: failure() && steps.key.outputs.has_key == 'true'
+        uses: actions/upload-artifact@v7
+        with:
+          name: stack-logs-sasser
+          path: .stack/*.log
+          if-no-files-found: ignore
+          retention-days: 7
 
   # The Helm chart, verified without a cluster: lint, the render snapshots
   # (scripts/check-chart.mjs) and schema validation of every rendered object.

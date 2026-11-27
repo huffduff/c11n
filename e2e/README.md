@@ -17,23 +17,123 @@ npm run e2e
 # or one fixture at a time
 npm run e2e:vite
 npm run e2e:go
+npm run e2e:sasser   # the real dogfood app (ADR 0009)
 ```
 
-## Two fixtures, one suite
+## Fixtures
 
 The dogfood app is served by Vite in dev and by a Go backend in production
-(ADR 0001), so the same suite runs against both topologies, each with its own
-fresh stack:
+(ADR 0001), so the same generic suite runs against both demo topologies, each
+with its own fresh stack. A third fixture proxies the **real client app**, the
+`sasser-studios` frontend, and runs the compatibility probe instead of the demo
+specs:
 
-| `C11N_FIXTURE` | upstream | port |
-| --- | --- | --- |
-| `vite` (default) | `examples/demo-vue` via the vite dev server (HMR) | 15173 |
-| `go` | the built `examples/demo-vue/dist` via `examples/demo-go-server` | 15174 |
+| `C11N_FIXTURE` | upstream | port | specs |
+| --- | --- | --- | --- |
+| `vite` (default) | `examples/demo-vue` via the vite dev server (HMR) | 15173 | all |
+| `go` | the built `examples/demo-vue/dist` via `examples/demo-go-server` | 15174 | all |
+| `sasser` | `huffduff/sasser-studios` `frontend/` via its own vite dev server, HTTPS | 15175 | `specs/upstream-compat.spec.ts` |
 
 `stack.sh` builds the SPA and the Go binary into `.stack/` for the `go`
 fixture. Upstreams are otherwise interchangeable: Caddy's config is identical,
 and `specs/topology.spec.ts` holds the specs that only make sense for one side
-(each skips on the other). CI runs the matrix over both fixtures.
+(each skips on the other). CI runs the matrix over both demo fixtures, plus a
+separate `e2e (sasser)` job for this one.
+
+Spec selection for `sasser` is `testMatch` in `playwright.config.ts`, not
+per-spec skips: the demo specs drive demo-vue's own DOM (`#hero-title`,
+`/pricing`, `api: go`) and would fail on any other app, so the cheapest honest
+answer is not to select them. The reverse direction — `upstream-compat.spec.ts`
+on the vite/go runs — is a describe-level `test.skip`, the same pattern
+`topology.spec.ts` already uses.
+
+## The sasser fixture (Phase 4, ADR 0009)
+
+The target is a **private** repo, pinned by full sha in `scripts/tools.env`
+(`SASSER_REPO`, `SASSER_REF`). Bump `SASSER_REF` deliberately: a new commit in
+that repo must not turn CI red unannounced.
+
+```bash
+# a checkout you already have (CI does this, with a read-only deploy key)
+C11N_SASSER_DIR=/path/to/sasser-studios npm run e2e:sasser
+
+# or let the stack shallow-fetch the pinned sha into .stack/sasser-studios
+# (authenticates with YOUR git setup for github.com: `gh auth setup-git`)
+npm run e2e:sasser
+```
+
+- `C11N_SASSER_DIR` must be at `SASSER_REF` **with no changes to tracked
+  files**, or `up` refuses (the probe has to mean *the pinned commit* passed);
+  untracked files such as `node_modules` are fine. `C11N_SASSER_ALLOW_DIRTY=1`
+  overrides both the HEAD check and the dirty check for a local experiment,
+  with a loud warning that a pass is then not evidence about the pin.
+- Without `C11N_SASSER_DIR` the clone is a plain `https` fetch: no token is
+  handled, stored or logged by `stack.sh`, so the box's git credentials must
+  already work for the private repo. On failure it says to set
+  `C11N_SASSER_DIR` or configure git credentials. The same tracked-file rule
+  applies to `.stack/sasser-studios` when a previous run's clone is reused:
+  HEAD is verified first (and only then is the reuse logged), and a locally
+  edited tracked file is refused unless `C11N_SASSER_ALLOW_DIRTY=1`.
+- Dependencies are installed only when missing or when a manifest changed (the
+  stamp, over `package.json`, `frontend/package.json` and `package-lock.json`,
+  is in `.stack/`, never in the client checkout). `frontend/` is an npm
+  workspace of that repo's root, so npm runs at the checkout root and hoists
+  `node_modules/`. `SASSER_REF` **does** track `package-lock.json`, so the only
+  recipe is `npm ci` (a lock-less install would re-resolve sasser's `vite:
+  beta` / `vue: beta` dist-tags); a checkout without a lockfile is refused.
+- The dev server runs on **`node` 24.19.0**, c11n's pin from `.tool-versions`,
+  passed as `ASDF_NODEJS_VERSION` because sasser's own `.tool-versions` pins
+  node 25, which is not installed anywhere here. That variable is only read by
+  asdf's nodejs plugin: in CI, `setup-node` provides the same node from c11n's
+  `.tool-versions` and the variable is inert. Their `.tool-versions` is not
+  edited.
+- Upstream TLS is `insecure` for this fixture only (self-signed vite cert).
+  `stack.sh` refuses `C11N_UPSTREAM_TLS=insecure` for the demo fixtures and
+  refuses anything else for `sasser`.
+- `down` stops the vite process by pidfile, by process group; the marker check
+  carries `--port 15175`, so no unrelated vite on the box can be adopted or
+  killed.
+
+### CI (`e2e (sasser)`)
+
+`.github/workflows/ci.yml` runs this fixture as its own job, `e2e (sasser)` —
+not a third value in the `e2e` matrix, so the deploy key never reaches the
+`vite` and `go` runners. In order:
+
+- a step reads `SASSER_REF` out of `scripts/tools.env` into a step output,
+  after checking it is a full 40-char lowercase sha (it goes on a `git`
+  command line): the sha is never duplicated in the workflow, so bumping the
+  pin moves the checkout and the fixture's HEAD assertion together;
+- a step exports `secrets.SASSER_DEPLOY_KEY` and publishes `has_key`, because a
+  secret cannot be referenced from an `if:`. Every later step is gated on it;
+- ONE `run:` step checks `huffduff/sasser-studios` out at that sha into
+  `.stack-sasser/` (outside the npm workspace patterns, gitignored, and not
+  globbed by any test or check), using the read-only deploy key
+  "c11n CI (read-only)". The key is `env:`-scoped to that step only, written
+  under `$RUNNER_TEMP` with `umask 077`, used for a single
+  `git fetch <url> <sha>`, and removed by an `EXIT` trap — so it is gone before
+  `npm ci`, the probe and every dependency's install script run, and it never
+  reaches a `.git/config` (no remote is added; the fetch is by URL).
+  Host-key checking is on against GitHub's published ed25519 key. This is
+  deliberately not `actions/checkout` with `ssh-key:`, which leaves the key on
+  disk until its post-job step;
+- a step asserts that checkout's HEAD really is `SASSER_REF`, that
+  `.git/config` carries no url/credential setting, and logs the commit subject,
+  so the run's log is evidence about the pin;
+- `C11N_SASSER_DIR` points at `.stack-sasser/`; `stack.sh` does the `npm ci`
+  and the vite dev server as it does locally.
+
+That job uploads **no Playwright artifact** — a trace, screenshot or video of
+the private app's DOM is not something a public repo's actions may keep. The
+config sets `trace: 'off'` for this fixture (screenshots/videos are off by
+default), and the only failure artifact is `.stack/*.log`, the services' own
+logs, retained for a week.
+
+Without the secret (a `pull_request` from a fork) the job succeeds having done
+nothing: a `::notice::` and a job-summary line say the probe did not run, and
+the leg is not counted as evidence. Node is c11n's pin from `.tool-versions`;
+sasser's own `.tool-versions` is not read.
+
 
 `fetch-tools.sh` builds Caddy with xcaddy (needs `go`, pinned in
 `.tool-versions`; `asdf install` if the shim says no version is set) and the
@@ -43,11 +143,12 @@ build, point `CADDY_BIN` / `POCKETBASE_BIN` at prebuilt binaries —
 `fetch-tools.sh` is idempotent: an existing `.tools/caddy` of the pinned version
 (and `.tools/pocketbase` reporting the pinned version) is left alone.
 
-`stack.sh up` refuses to start when 18090, 15173, 15174 or 18080 is already
-listening — both fixture ports, so a stack left behind by the other fixture is
-caught too — on 127.0.0.1 or ::1, and it will not adopt a foreign process. It
-stops whatever it did start if any step fails, and the `go` fixture is built
-before anything starts, so a build error leaves nothing running.
+`stack.sh up` refuses to start when 18090, 15173, 15174, 15175 or 18080 is
+already listening — every fixture port, so a stack left behind by another
+fixture is caught too — on 127.0.0.1 or ::1, and it will not adopt a foreign
+process. It stops whatever it did start if any step fails, and the `go` and
+`sasser` fixtures are prepared (build, checkout, install) before anything
+starts, so a failure there leaves nothing running.
 
 ## This box: Playwright browsers
 
@@ -121,6 +222,31 @@ pins that behaviour.
 The `request` fixture shares one cookie jar across a spec file: use
 `isolatedRequest()` from `fixtures.ts` for the "anonymous gets 401" assertions,
 or they pass for the wrong reason after an earlier sign-in.
+
+## The compatibility probe (Phase 4)
+
+`specs/upstream-compat.spec.ts` is the only spec the `sasser` fixture runs. Per
+route (`/today`, `/schedule`, `/members`, `/members/<a mock user id>`,
+`/packages`) it asserts that the overlay is injected, that the proxy introduces
+no console error or `pageerror` the app does not already produce when the same
+route is loaded directly on the upstream (a second context with
+`ignoreHTTPSErrors`), that the URL stays on the review host after an in-app
+sidebar navigation, that no same-origin request fails, and that nothing
+navigates to Zitadel/`/login`/`/auth/callback` (app login is out of scope,
+ADR 0009). Once per run it also checks the vite HMR websocket through the proxy,
+a full comment round trip anchored to a member table row (pin, reload, storage),
+and that the overlay's shadow-DOM styles do not leak into the app's computed
+styles.
+
+Both error sets are printed for every route so a failure is diagnosable without
+a trace. The overlay's own realtime `EventSource` is aborted on every full page
+load, which Chromium reports as a failed request; only that URL and only
+`ERR_ABORTED` is excluded, and the number of established streams is printed
+next to the aborts.
+
+A real incompatibility found here is committed as `test.fail()` with the
+symptom and evidence, not fixed in the probe (Task 4.3 fixes proxies) and not
+weakened into a pass.
 
 ## Reading the results
 

@@ -24,6 +24,44 @@ export interface Creds {
  */
 export const GO_PORT = 15174
 
+/**
+ * Port of the sasser fixture's vite dev server. Keep in sync with
+ * `SASSER_PORT` in scripts/stack.sh (same reason as GO_PORT).
+ */
+export const SASSER_PORT = 15175
+
+/**
+ * The fixture under test. One definition for everything that branches on it:
+ * `e2e/playwright.config.ts` (spec selection, project name) and
+ * `upstreamUrl()` below. C11N_E2E_EXTERNAL=1 keeps its old meaning: the stack
+ * lives elsewhere, so the default topology is the production-like `go` one.
+ */
+export function fixtureName(): string {
+  return process.env.C11N_FIXTURE ?? (process.env.C11N_E2E_EXTERNAL === '1' ? 'go' : 'vite')
+}
+
+/**
+ * Origin of the fixture upstream itself, i.e. the app WITHOUT the proxy in
+ * front of it. `upstream-compat.spec.ts` loads the same route there in a
+ * separate context and diffs the console output, which is the only way to tell
+ * "the app logs this" from "the proxy introduced it".
+ *
+ * Plain http for the demo fixtures; sasser's vite dev server is HTTPS with a
+ * self-signed cert (ADR 0009), so its contexts need `ignoreHTTPSErrors`.
+ */
+export function upstreamUrl(): string {
+  const override = process.env.C11N_E2E_UPSTREAM
+  if (override) return override.replace(/\/+$/, '')
+  switch (fixtureName()) {
+    case 'go':
+      return `http://127.0.0.1:${GO_PORT}`
+    case 'sasser':
+      return `https://127.0.0.1:${SASSER_PORT}`
+    default:
+      return 'http://127.0.0.1:15173'
+  }
+}
+
 export type Role = 'owner' | 'team' | 'client' | 'agent'
 
 export interface PbUser {

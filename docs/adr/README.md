@@ -18,6 +18,7 @@ Each ADR records one decision: its context, the choice, and its consequences.
 | [0006](0006-passwordless-identity-at-the-proxy.md) | Passwordless invite / magic-link identity, httpOnly session cookie, proxy-enforced gate. MVP invites are copy-the-link | Accepted 2026-11-25 |
 | [0007](0007-stack-e2e-is-definition-of-done.md) | A scripted full-stack e2e test is the definition of done | Accepted 2026-11-25 |
 | [0008](0008-roles-and-permissions.md) | Roles: owner / team / client / agent. The agent triages and turns comments into tickets | Accepted 2026-11-25 |
+| [0009](0009-dogfood-target-sasser-vite-dev.md) | Dogfood target is `huffduff/sasser-studios` `frontend/` in Vite dev mode (mock data), app login out of scope, its deep-link 404 is its bug | Accepted 2026-11-27 |
 
 ## Housekeeping decisions (2026-11-25, Tom: "be aggressive with cleanup")
 

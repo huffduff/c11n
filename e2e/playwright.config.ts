@@ -1,4 +1,5 @@
 import { defineConfig } from '@playwright/test'
+import { fixtureName } from './fixtures'
 
 /**
  * Full-stack e2e: real PocketBase, the demo app and Caddy, all started from
@@ -27,12 +28,15 @@ import { defineConfig } from '@playwright/test'
  * the specs assert on global row sets, so parallel workers would race each
  * other's fixtures.
  */
-const fixture = process.env.C11N_FIXTURE ?? (process.env.C11N_E2E_EXTERNAL === '1' ? 'go' : 'vite')
+const fixture = fixtureName()
 
 // The sasser run is the compatibility probe against the real client app: the
 // demo-only specs are not selected at all (see above).
-// Patterns are matched against the file path relative to testDir, so the
-// directory itself must not be repeated here.
+//
+// testMatch patterns are matched against each spec's ABSOLUTE path, and any
+// pattern that does not start with `**/` is prefixed with it, so a bare
+// 'upstream-compat.spec.ts' becomes '**/upstream-compat.spec.ts' — it matches
+// that file anywhere under testDir without repeating the './specs/' prefix.
 const testMatch = fixture === 'sasser' ? ['upstream-compat.spec.ts'] : ['**/*.spec.ts']
 
 // In external mode the origin is whatever the operator points at (normally a

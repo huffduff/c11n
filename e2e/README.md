@@ -53,29 +53,36 @@ The target is a **private** repo, pinned by full sha in `scripts/tools.env`
 that repo must not turn CI red unannounced.
 
 ```bash
-# a checkout you already have (CI uses this path, with a read-only deploy key)
+# a checkout you already have (CI does this, with a read-only deploy key)
 C11N_SASSER_DIR=/path/to/sasser-studios npm run e2e:sasser
 
 # or let the stack shallow-fetch the pinned sha into .stack/sasser-studios
-SASSER_CHECKOUT_TOKEN=<read-only token> npm run e2e:sasser
+# (authenticates with YOUR git setup for github.com: `gh auth setup-git`)
+npm run e2e:sasser
 ```
 
-- `C11N_SASSER_DIR` must be at `SASSER_REF`, or `up` refuses (the probe has to
-  mean *the pinned commit* passed). `C11N_SASSER_ALLOW_DIRTY=1` overrides that
-  for a local experiment.
-- With `SASSER_CHECKOUT_TOKEN` the token goes on the `git fetch` command line
-  only; `origin` stays credential-free, so it is never written into the
-  checkout's `.git/config`. Without a token the fetch is unauthenticated and
-  fails with a clear message (the repo is private).
+- `C11N_SASSER_DIR` must be at `SASSER_REF` **with no changes to tracked
+  files**, or `up` refuses (the probe has to mean *the pinned commit* passed);
+  untracked files such as `node_modules` are fine. `C11N_SASSER_ALLOW_DIRTY=1`
+  overrides both the HEAD check and the dirty check for a local experiment,
+  with a loud warning that a pass is then not evidence about the pin.
+- Without `C11N_SASSER_DIR` the clone is a plain `https` fetch: no token is
+  handled, stored or logged by `stack.sh`, so the box's git credentials must
+  already work for the private repo. On failure it says to set
+  `C11N_SASSER_DIR` or configure git credentials.
 - Dependencies are installed only when missing or when a manifest changed (the
-  stamp is in `.stack/`, never in the client checkout). `frontend/` is an npm
+  stamp, over `package.json`, `frontend/package.json` and `package-lock.json`,
+  is in `.stack/`, never in the client checkout). `frontend/` is an npm
   workspace of that repo's root, so npm runs at the checkout root and hoists
-  `node_modules/`; the pin commits no `package-lock.json`, so the recipe is
-  `npm install --no-package-lock --legacy-peer-deps` (a bare `npm install`
-  would write a lockfile into the client tree, which is forbidden).
-- The dev server runs on **`node` 24.19.0** (c11n's pin) via
-  `ASDF_NODEJS_VERSION`, because sasser's own `.tool-versions` pins node 25,
-  which is not installed anywhere here. Their `.tool-versions` is not edited.
+  `node_modules/`. `SASSER_REF` **does** track `package-lock.json`, so the only
+  recipe is `npm ci` (a lock-less install would re-resolve sasser's `vite:
+  beta` / `vue: beta` dist-tags); a checkout without a lockfile is refused.
+- The dev server runs on **`node` 24.19.0**, c11n's pin from `.tool-versions`,
+  passed as `ASDF_NODEJS_VERSION` because sasser's own `.tool-versions` pins
+  node 25, which is not installed anywhere here. That variable is only read by
+  asdf's nodejs plugin: in CI, `setup-node` provides the same node from c11n's
+  `.tool-versions` and the variable is inert. Their `.tool-versions` is not
+  edited.
 - Upstream TLS is `insecure` for this fixture only (self-signed vite cert).
   `stack.sh` refuses `C11N_UPSTREAM_TLS=insecure` for the demo fixtures and
   refuses anything else for `sasser`.

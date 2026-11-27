@@ -1,5 +1,5 @@
 import { expect, test, type Browser, type ConsoleMessage, type Page } from '@playwright/test'
-import { listComments, resetData, signInAs, upstreamUrl } from '../fixtures'
+import { fixtureName, listComments, resetData, signInAs, upstreamUrl } from '../fixtures'
 
 /**
  * Upstream compatibility probe: the REAL dogfood app behind the proxy (ADR 0009).
@@ -19,7 +19,7 @@ import { listComments, resetData, signInAs, upstreamUrl } from '../fixtures'
  * `test.fail()` with the symptom and the evidence in the annotation/comment,
  * the way Task 1.5 recorded the Phase 2 overlay bugs. Fixes belong to Task 4.3.
  */
-const fixture = process.env.C11N_FIXTURE ?? 'vite'
+const fixture = fixtureName()
 const UPSTREAM = upstreamUrl()
 const REVIEW_ORIGIN = new URL(process.env.C11N_E2E_BASE_URL ?? 'http://127.0.0.1:18080').origin
 
@@ -65,14 +65,35 @@ function normalize(text: string): string {
     .replace(/([?&])token=[^&\s]*/g, '$1token=<redacted>')
 }
 
-interface Collected {
+interface ErrorSet {
   console: string[]
   pageerror: string[]
 }
 
+/**
+ * A live collector over one page. `clear()` opens a new observation window and
+ * `snapshot()` freezes the current one, so a later phase (the sidebar
+ * navigation) cannot retroactively join the set that is being compared against
+ * a single direct route load.
+ */
+interface Collected extends ErrorSet {
+  clear: () => void
+  snapshot: () => ErrorSet
+}
+
 /** Everything that counts as "the page complained", as reported by Chromium. */
 function collectErrors(page: Page): Collected {
-  const out: Collected = { console: [], pageerror: [] }
+  const out: Collected = {
+    console: [],
+    pageerror: [],
+    clear() {
+      out.console.length = 0
+      out.pageerror.length = 0
+    },
+    snapshot() {
+      return { console: [...out.console], pageerror: [...out.pageerror] }
+    },
+  }
   page.on('console', (msg: ConsoleMessage) => {
     if (msg.type() === 'error') out.console.push(normalize(msg.text()))
   })
@@ -82,7 +103,7 @@ function collectErrors(page: Page): Collected {
   return out
 }
 
-function flatten(c: Collected): string[] {
+function flatten(c: ErrorSet): string[] {
   return [...c.console.map((t) => `console: ${t}`), ...c.pageerror.map((t) => `pageerror: ${t}`)]
 }
 
@@ -138,9 +159,23 @@ function collectNavigations(page: Page): string[] {
   return out
 }
 
-/** A context on the upstream itself: no proxy, and the vite self-signed cert. */
-async function openDirect(browser: Browser, path: string, ready: string): Promise<{ page: Page; errors: Collected; close: () => Promise<void> }> {
-  const context = await browser.newContext({ ignoreHTTPSErrors: true })
+/**
+ * A context on the upstream itself: no proxy, and the vite self-signed cert.
+ *
+ * The viewport is copied from the proxy-side page: sasser's layout responds to
+ * width (the sidebar collapses, tables reflow), and a different window size
+ * would make "same console output" a description of two different pages.
+ */
+async function openDirect(
+  browser: Browser,
+  source: Page,
+  path: string,
+  ready: string,
+): Promise<{ page: Page; errors: Collected; close: () => Promise<void> }> {
+  const context = await browser.newContext({
+    ignoreHTTPSErrors: true,
+    viewport: source.viewportSize(),
+  })
   const page = await context.newPage()
   const errors = collectErrors(page)
   await page.goto(`${UPSTREAM}${path}`)
@@ -151,9 +186,9 @@ async function openDirect(browser: Browser, path: string, ready: string): Promis
   return { page, errors, close: () => context.close() }
 }
 
-function printSets(path: string, direct: Collected, proxy: Collected): void {
+function printSets(label: string, direct: ErrorSet, proxy: ErrorSet): void {
   console.log(
-    `\n[compat ${path}] console/pageerror sets` +
+    `\n[compat ${label}] console/pageerror sets` +
       `\n  direct  (${UPSTREAM}): ${JSON.stringify(direct, null, 1)}` +
       `\n  through (${REVIEW_ORIGIN}): ${JSON.stringify(proxy, null, 1)}`,
   )
@@ -177,6 +212,11 @@ test.describe('sasser upstream compatibility', () => {
       const navigations = collectNavigations(page)
 
       await signInAs(page)
+      // From here the collector covers exactly ONE route load: the sign-in
+      // landing is not the route under test and has no counterpart on the
+      // direct side, so keeping it would compare unlike things.
+      errors.clear()
+
       await page.goto(route.path)
       await expect(page.locator(route.ready).first()).toBeVisible()
 
@@ -187,27 +227,49 @@ test.describe('sasser upstream compatibility', () => {
       // (c) still the review host, not the upstream
       expect(new URL(page.url()).origin, `after loading ${route.path}`).toBe(REVIEW_ORIGIN)
 
-      // ...and after one in-app sidebar navigation (vue-router history push:
-      // no server round trip is involved, which is the point).
-      const target = route.path === '/packages' ? 'Today' : 'Packages'
-      const targetPath = route.path === '/packages' ? '/today' : '/packages'
-      await navLink(page, target).click()
-      await expect(page).toHaveURL(new RegExp(`${targetPath}$`))
-      expect(new URL(page.url()).origin, `after clicking ${target}`).toBe(REVIEW_ORIGIN)
-
-      // Settle, then read the same route straight off the upstream.
+      // Settle, freeze the proxy's error set for THIS route load, then read the
+      // same route straight off the upstream. Freezing before the sidebar
+      // click below is what makes (b) like-for-like: the direct context loads
+      // one route, so the proxy set must be one route load too.
       await page.waitForTimeout(750)
-      const direct = await openDirect(browser, route.path, route.ready)
+      const proxyRoute = errors.snapshot()
+      const direct = await openDirect(browser, page, route.path, route.ready)
+      let routeDirect: string[] = []
       try {
-        printSets(route.path, direct.errors, errors)
+        printSets(`${route.path} (route load)`, direct.errors, proxyRoute)
 
         // (b) no console error / pageerror through the proxy that the app does
         // not already produce when loaded directly.
-        const directAll = flatten(direct.errors)
-        const extras = flatten(errors).filter((entry) => !directAll.includes(entry))
+        routeDirect = flatten(direct.errors)
+        const extras = flatten(proxyRoute).filter((entry) => !routeDirect.includes(entry))
         expect(extras, `errors only the proxy introduces on ${route.path}`).toEqual([])
       } finally {
         await direct.close()
+      }
+
+      // ...and after one in-app sidebar navigation (vue-router history push:
+      // no server round trip is involved, which is the point). Its console
+      // output is collected separately and compared against a direct load of
+      // the TARGET route, so it is neither blamed on nor excused by the route
+      // load above.
+      errors.clear()
+      const target = route.path === '/packages' ? 'Today' : 'Packages'
+      const targetPath = route.path === '/packages' ? '/today' : '/packages'
+      const targetReady = ROUTES.find((r) => r.path === targetPath)!.ready
+      await navLink(page, target).click()
+      await expect(page).toHaveURL(new RegExp(`${targetPath}$`))
+      expect(new URL(page.url()).origin, `after clicking ${target}`).toBe(REVIEW_ORIGIN)
+      await page.waitForTimeout(750)
+
+      const proxyNav = errors.snapshot()
+      const directNav = await openDirect(browser, page, targetPath, targetReady)
+      try {
+        printSets(`${route.path} -> ${targetPath} (in-app navigation)`, directNav.errors, proxyNav)
+        const baseline = [...flatten(directNav.errors), ...routeDirect]
+        const navExtras = flatten(proxyNav).filter((entry) => !baseline.includes(entry))
+        expect(navExtras, `errors only the proxy introduces navigating to ${targetPath}`).toEqual([])
+      } finally {
+        await directNav.close()
       }
 
       // (d) no failed same-origin request through the proxy. The overlay's own
@@ -217,6 +279,12 @@ test.describe('sasser upstream compatibility', () => {
         `[compat ${route.path}] overlay realtime streams: ${net.realtimeStreams} established, ` +
           `${net.abortedSse.length} aborted by navigation`,
       )
+      // Every document load of the review host opens the overlay's EventSource
+      // (the sign-in landing, then page.goto), so by now at least one stream
+      // must have been ESTABLISHED (a 200). Asserted — not just printed — so
+      // the ERR_ABORTED exclusion above cannot hide a stream that never
+      // connected: a route where the SSE path is broken must fail here.
+      expect(net.realtimeStreams, `overlay realtime streams established on ${route.path}`).toBeGreaterThan(0)
       expect(net.failed, `failed same-origin requests on ${route.path}`).toEqual([])
 
       // (e) the app's login is out of scope (ADR 0009): nothing may navigate to
@@ -302,7 +370,7 @@ test.describe('sasser upstream compatibility', () => {
     await expect(page.locator('table.members-table')).toBeVisible()
     await expect(page.locator('.c11n-toolbar')).toBeVisible()
 
-    const direct = await openDirect(browser, '/members', 'table.members-table')
+    const direct = await openDirect(browser, page, '/members', 'table.members-table')
     let throughStyles: Record<string, string>
     let directStyles: Record<string, string>
     try {

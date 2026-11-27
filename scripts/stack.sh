@@ -340,11 +340,15 @@ build_go_fixture() {
 # The dogfood target is a PRIVATE repository, and the e2e stack must run on a
 # developer box and in CI without either of them owning a writable clone. So:
 #   - C11N_SASSER_DIR set: use that checkout, but only if its HEAD is exactly
-#     SASSER_REF. A dirty tree or a different commit is refused, because "the
-#     probe passed" has to mean the pinned commit passed; C11N_SASSER_ALLOW_DIRTY=1
-#     is the explicit opt-out for someone testing a local change.
-#   - otherwise: a shallow fetch of SASSER_REF into $STATE_DIR/sasser-studios,
-#     authenticated by SASSER_CHECKOUT_TOKEN when set (CI), never persisted.
+#     SASSER_REF and its TRACKED files are clean. A different commit or a dirty
+#     tree is refused, because "the probe passed" has to mean the pinned commit
+#     passed; C11N_SASSER_ALLOW_DIRTY=1 is the explicit opt-out for someone
+#     testing a local change (it warns loudly: the result is then not evidence
+#     about the pin). Untracked files (node_modules) are fine.
+#   - otherwise: a shallow fetch of SASSER_REF into $STATE_DIR/sasser-studios
+#     over plain https, authenticated by the caller's own git setup
+#     (`gh auth setup-git`, a credential helper). No token is ever handled,
+#     stored or echoed by this script.
 # Nothing in the sasser-studios tree is modified: node_modules (gitignored) is
 # the only thing written there, and the install stamp lives in $STATE_DIR.
 
@@ -368,28 +372,25 @@ sasser_node_version() {
 	printf '%s' "$v"
 }
 
-# fetch_sasser <dir> <plain-url>: fetch exactly SASSER_REF, one commit deep.
+# fetch_sasser <dir> <url>: fetch exactly SASSER_REF, one commit deep.
 #
-# The token, when present, goes on the command line only: `origin` keeps the
-# credential-free URL, so nothing is written into the checkout's .git/config
-# and `git remote -v` / a copied checkout cannot leak it. (argv is visible to
-# the same user via ps; that is the accepted tradeoff for not persisting it.)
+# The URL is credential-free and no token is passed: authentication comes from
+# the caller's own git configuration for github.com (`gh auth setup-git`, a
+# credential helper, or a rewritten remote). That keeps a token out of this
+# script, out of argv, and out of .stack/sasser-checkout.log, which is tailed
+# to stderr on failure.
 fetch_sasser() {
-	local dir="$1" plain="$2" auth
-	auth="$plain"
-	if [ -n "${SASSER_CHECKOUT_TOKEN:-}" ]; then
-		auth="https://x-access-token:${SASSER_CHECKOUT_TOKEN}@github.com/${SASSER_REPO}.git"
-	fi
-	if ! git -C "$dir" fetch -q --depth 1 --no-tags "$auth" "$SASSER_REF" \
+	local dir="$1" url="$2"
+	if ! git -C "$dir" fetch -q --depth 1 --no-tags "$url" "$SASSER_REF" \
 		>>"$(log_file sasser-checkout)" 2>&1; then
 		log "---- $(log_file sasser-checkout) (tail) ----"
 		tail -n 20 "$(log_file sasser-checkout)" >&2 || true
-		die "git fetch of $SASSER_REPO@$SASSER_REF failed (private repo: set SASSER_CHECKOUT_TOKEN, or C11N_SASSER_DIR to a local checkout)"
+		die "git fetch of $SASSER_REPO@$SASSER_REF failed. $SASSER_REPO is private: set C11N_SASSER_DIR to a local checkout (CI does this with a read-only deploy key), or configure git credentials for github.com (e.g. 'gh auth setup-git') so the plain https clone can authenticate."
 	fi
 }
 
 ensure_sasser_checkout() {
-	local dir url head
+	local dir url head dirty
 	: "${SASSER_REPO:?SASSER_REPO is not set in scripts/tools.env}"
 	: "${SASSER_REF:?SASSER_REF is not set in scripts/tools.env}"
 	dir="$(sasser_dir)"
@@ -399,9 +400,22 @@ ensure_sasser_checkout() {
 		head="$(git -C "$dir" rev-parse HEAD 2>/dev/null || true)"
 		if [ "$head" != "$SASSER_REF" ]; then
 			if [ "${C11N_SASSER_ALLOW_DIRTY:-0}" = 1 ]; then
-				log "warning: sasser checkout HEAD ${head:0:12} != SASSER_REF ${SASSER_REF:0:12} (C11N_SASSER_ALLOW_DIRTY=1)"
+				log "WARNING: sasser checkout HEAD ${head:0:12} != SASSER_REF ${SASSER_REF:0:12}; a pass is NOT evidence about the pin (C11N_SASSER_ALLOW_DIRTY=1)"
 			else
-				die "C11N_SASSER_DIR=$dir is at ${head:0:12} (${head:-no HEAD}), but SASSER_REF is ${SASSER_REF:0:12}. Check out the pin (git -C $dir checkout --detach $SASSER_REF), or set C11N_SASSER_ALLOW_DIRTY=1 to run against that tree anyway."
+				die "C11N_SASSER_DIR=$dir is at ${head:0:12} (${head:-no HEAD}), but SASSER_REF is ${SASSER_REF:0:12}. Check out the pin (git -C $dir checkout --detach $SASSER_REF), or set C11N_SASSER_ALLOW_DIRTY=1 to run against that tree anyway (a pass is then not evidence about the pin)."
+			fi
+		fi
+		# Tracked-file changes are refused for the same reason as a different
+		# HEAD; untracked files are ignored on purpose (node_modules lives there).
+		dirty="$(git -C "$dir" status --porcelain --untracked-files=no 2>/dev/null || true)"
+		if [ -n "$dirty" ]; then
+			if [ "${C11N_SASSER_ALLOW_DIRTY:-0}" = 1 ]; then
+				log "WARNING: sasser checkout $dir has uncommitted changes to tracked files; a pass is NOT evidence about the pin (C11N_SASSER_ALLOW_DIRTY=1):"
+				printf '%s\n' "$dirty" | sed 's/^/  /' >&2
+			else
+				die "C11N_SASSER_DIR=$dir has uncommitted changes to tracked files:
+$(printf '%s\n' "$dirty" | sed 's/^/  /')
+The probe must run against a clean checkout of SASSER_REF. Commit or stash them (untracked files such as node_modules are fine), or set C11N_SASSER_ALLOW_DIRTY=1 to run against that tree anyway (a pass is then not evidence about the pin)."
 			fi
 		fi
 		log "sasser: using C11N_SASSER_DIR=$dir @ ${head:0:12}"
@@ -431,59 +445,44 @@ ensure_sasser_checkout() {
 # missing or the manifests changed since the last install, so a no-op suite run
 # does not pay for (or churn) a full install.
 #
-# Two quirks of the pinned commit decide the recipe:
-#   - frontend/ is an npm WORKSPACE of the repo root (`workspaces: ["frontend"]`,
-#     ADR 0009's checkout), so npm installs from the root and hoists
-#     node_modules/: the vite binary lives in <root>/node_modules/.bin, and
-#     running npm inside frontend/ makes npm walk up and install the root
-#     project anyway.
-#   - the pin commits no package-lock.json (their CI references one, but it is
-#     not in the tree), and a lock-less `npm install` fails with ERESOLVE on
-#     @typescript-eslint's typescript peer. Hence npm ci when a lockfile is
-#     present (an existing checkout may have one), else
-#     `npm install --no-package-lock --legacy-peer-deps`.
-#     --no-package-lock is required: without it npm WRITES a package-lock.json
-#     into the client checkout, and "no file in sasser-studios is modified" is
-#     the whole point of the dogfood.
+# frontend/ is an npm WORKSPACE of the repo root (`workspaces: ["frontend"]`,
+# ADR 0009's checkout), so npm installs from the root and hoists node_modules/:
+# the vite binary lives in <root>/node_modules/.bin, and running npm inside
+# frontend/ makes npm walk up and install the root project anyway.
 #
-# The stamp is `<root path> <sha256 of root+frontend package.json>` in
-# $STATE_DIR, NOT inside the checkout.
+# The pin DOES track package-lock.json (`git ls-files package-lock.json` at
+# SASSER_REF lists it), so `npm ci` is the only recipe. That is also the only
+# reproducible one: `npm install` would re-resolve sasser's `vite: beta` /
+# `vue: beta` dist-tags to whatever was published that day, and could write a
+# new lockfile into the client checkout. A checkout without a lockfile is
+# refused rather than guessed at.
+#
+# The stamp is
+# `<root path> <sha256 of root+frontend package.json and root package-lock.json>`
+# in $STATE_DIR, NOT inside the checkout.
 sasser_install_deps() {
-	local root frontend stamp want log_path install_desc
+	local root frontend stamp want log_path
 	root="$(sasser_dir)"
 	frontend="$(sasser_frontend)"
 	stamp="$STATE_DIR/sasser-npm-ci.stamp"
 	[ -f "$root/package.json" ] && [ -f "$frontend/package.json" ] ||
 		die "the sasser checkout at $root has no package.json + frontend/package.json; C11N_SASSER_DIR must point at the repo root"
-	want="$root $(cat "$root/package.json" "$frontend/package.json" | sha256sum | cut -d' ' -f1)"
-	if [ -f "$root/package-lock.json" ]; then
-		install_desc="npm ci"
-	else
-		install_desc="npm install --no-package-lock --legacy-peer-deps (the pin commits no package-lock.json)"
-	fi
+	[ -f "$root/package-lock.json" ] ||
+		die "the sasser checkout at $root has no package-lock.json. SASSER_REF ($SASSER_REF) tracks one and 'npm ci' is the only install path here (a lock-less npm install would re-resolve the 'beta' dist-tags and could write a lockfile into the client checkout)."
+	want="$root $(cat "$root/package.json" "$frontend/package.json" "$root/package-lock.json" | sha256sum | cut -d' ' -f1)"
 	if [ -f "$stamp" ] && [ "$(cat "$stamp")" = "$want" ] && [ -x "$(sasser_vite_bin)" ]; then
 		log "sasser: node_modules matches the manifests (skipping install)"
 		return 0
 	fi
 	command -v npm >/dev/null 2>&1 || die "npm is required for C11N_FIXTURE=sasser"
 	log_path="$(log_file sasser-install)"
-	log "sasser: $install_desc in $root (node $(sasser_node_version))"
-	if [ -f "$root/package-lock.json" ]; then
-		(cd "$root" && ASDF_NODEJS_VERSION="$(sasser_node_version)" \
-			npm ci --no-audit --no-fund) >>"$log_path" 2>&1 || {
-			log "---- $log_path (tail) ----"
-			tail -n 40 "$log_path" >&2 || true
-			die "npm ci in $root failed"
-		}
-	else
-		(cd "$root" && ASDF_NODEJS_VERSION="$(sasser_node_version)" \
-			npm install --no-package-lock --legacy-peer-deps --no-audit --no-fund) \
-			>>"$log_path" 2>&1 || {
-			log "---- $log_path (tail) ----"
-			tail -n 40 "$log_path" >&2 || true
-			die "installing $root/node_modules failed"
-		}
-	fi
+	log "sasser: npm ci in $root (node $(sasser_node_version))"
+	(cd "$root" && ASDF_NODEJS_VERSION="$(sasser_node_version)" \
+		npm ci --no-audit --no-fund) >>"$log_path" 2>&1 || {
+		log "---- $log_path (tail) ----"
+		tail -n 40 "$log_path" >&2 || true
+		die "npm ci in $root failed"
+	}
 	printf '%s\n' "$want" >"$stamp"
 }
 

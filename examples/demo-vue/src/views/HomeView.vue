@@ -1,7 +1,21 @@
 <script setup>
-import { ref } from 'vue'
+import { onMounted, ref } from 'vue'
 
 const clicks = ref(0)
+
+// Same-origin API probe. The vite dev fixture has no /api/ping, so a failed
+// fetch must render "unavailable" rather than break the page: the same app has
+// to work under both topologies (dev: vite, prod: the Go server).
+const api = ref('checking')
+onMounted(async () => {
+  try {
+    const res = await fetch('/api/ping')
+    const body = res.ok ? await res.json() : null
+    api.value = body?.server ?? 'unavailable'
+  } catch {
+    api.value = 'unavailable'
+  }
+})
 </script>
 
 <template>
@@ -19,5 +33,6 @@ const clicks = ref(0)
       <li>Works with any stack</li>
       <li>Free tier forever</li>
     </ul>
+    <p id="api-status" data-testid="api-ping">api: {{ api }}</p>
   </section>
 </template>

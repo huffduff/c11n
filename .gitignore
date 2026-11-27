@@ -1,6 +1,9 @@
 # Dependencies
 node_modules/
 
+# Locally fetched pinned binaries (scripts/fetch-tools.sh)
+.tools/
+
 # Build artifacts
 dist/
 build/
@@ -26,3 +29,11 @@ logs/
 # OS
 .DS_Store
 Thumbs.db
+
+# Local native stack state (scripts/stack.sh)
+.stack/
+
+# Playwright outputs (e2e)
+e2e/test-results/
+e2e/playwright-report/
+e2e/blob-report/

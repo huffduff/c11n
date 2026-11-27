@@ -11,6 +11,11 @@ services:
       - ../packages/overlay/dist:/srv/overlay:ro
     environment:
       - C11N_UPSTREAM=${C11N_UPSTREAM:-http://demo:5173}
+      # Caddy reads {$C11N_UPSTREAM_TLS:verify}, and an EMPTY value counts as
+      # set (config load then fails: "File to import not found:
+      # upstream_tls_"). The default keeps it non-empty; leave the variable
+      # unset rather than empty.
+      - C11N_UPSTREAM_TLS=${C11N_UPSTREAM_TLS:-verify}
     depends_on:
       - pocketbase
       - demo

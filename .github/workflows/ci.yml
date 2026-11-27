@@ -1,12 +1,14 @@
 # c11n CI
 #
-# Two independent jobs:
+# Three independent jobs:
 #   - overlay: typecheck, build, and test the Vue overlay bundle; uploads
-#     the built overlay.js as an artifact.
+#     the built overlay.js as an artifact. Also lints the workflows.
+#   - e2e:     the real verification. Runs the whole Playwright suite against
+#     the full stack (PocketBase + Caddy + a demo upstream) on two
+#     fixtures: `vite` (dev server) and `go` (the production topology).
 #   - docker:  smoke-builds both deploy images (deploy/caddy, deploy/pocketbase).
-#     This is the first place these Dockerfiles are actually built — the dev
-#     environment has no Docker daemon, and both prior reviews flagged them as
-#     untested. A green docker job here is the real verification.
+#     It only proves the Dockerfiles build — no container is run, so treat a
+#     green docker job as "the images compile", not "the deployment works".
 
 name: ci
 
@@ -15,13 +17,23 @@ on:
     branches: [main]
   pull_request:
 
+# Least privilege: nothing here writes to the repo or reads secrets.
+permissions:
+  contents: read
+
+# A new push to the same branch makes the previous run's result irrelevant.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   overlay:
     runs-on: blacksmith-2vcpu-ubuntu-2404
+    timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version-file: .tool-versions
           cache: npm
@@ -29,12 +41,21 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      # Lints every workflow in .github/. The config in
+      # .github/actionlint.yaml declares the Blacksmith runner label (and is
+      # only read because this step runs actionlint at all).
+      - name: Lint workflows
+        run: |
+          bash <(curl -sSfL https://raw.githubusercontent.com/rhysd/actionlint/v1.7.12/scripts/download-actionlint.bash) 1.7.12
+          ./actionlint .github/workflows/ci.yml
+
       - name: Typecheck overlay
         run: npm run typecheck -w packages/overlay
 
-      # Build BEFORE test on purpose: test/mount-dist.spec auto-skips when
-      # packages/overlay/dist is absent. Building first means the dist smoke
-      # test runs against the freshly built bundle instead of silently skipping.
+      # Build BEFORE test on purpose: test/mount-dist.spec skips when
+      # packages/overlay/dist is absent locally but FAILS when it is absent
+      # under CI. Building first means the dist smoke test runs against the
+      # freshly built bundle.
       - name: Build overlay bundle
         run: npm run build -w packages/overlay
 
@@ -42,16 +63,88 @@ jobs:
         run: npm test -w packages/overlay -- --run
 
       - name: Upload overlay.js artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: overlay.js
           path: packages/overlay/dist/overlay.js
           if-no-files-found: error
 
+  # The real verification: the whole suite against the whole stack, once per
+  # topology. The actions are pinned to the same runner label as the other
+  # jobs; no Docker daemon is involved (scripts/fetch-tools.sh builds Caddy
+  # with xcaddy and downloads PocketBase).
+  e2e:
+    name: e2e (${{ matrix.fixture }})
+    runs-on: blacksmith-2vcpu-ubuntu-2404
+    timeout-minutes: 25
+    strategy:
+      # One fixture failing must not cancel the other: the point of the matrix
+      # is to see which topology broke.
+      fail-fast: false
+      matrix:
+        fixture: [vite, go]
+    env:
+      # globalSetup/globalTeardown read this to start and tear down the stack
+      # for the right upstream (vite dev server vs. the Go production build).
+      C11N_FIXTURE: ${{ matrix.fixture }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version-file: .tool-versions
+          cache: npm
+
+      # xcaddy (for the Caddy build) and the go fixture's server both need go.
+      # setup-go reads `.tool-versions` (asdf format) — support landed in v6,
+      # so v5 and older misparse the whole file as a version string.
+      # Cache disabled on purpose: examples/demo-go-server is stdlib-only, so
+      # there is no go.sum for setup-go to key a module cache on.
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: .tool-versions
+          cache: false
+
+      # The pinned binaries (.tools/caddy, .tools/pocketbase) are expensive to
+      # build/download and depend only on scripts/tools.env.
+      - uses: actions/cache@v6
+        with:
+          path: .tools
+          key: tools-${{ runner.os }}-${{ hashFiles('scripts/tools.env') }}
+
+      - name: Fetch pinned native tools
+        run: scripts/fetch-tools.sh
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Install Chromium
+        run: npx -w e2e playwright install --with-deps chromium
+
+      - name: Build overlay bundle
+        run: npm run build
+
+      # C11N_FIXTURE comes from the job env; stack.sh builds the SPA and the Go
+      # server itself for the go fixture.
+      - name: Run e2e suite
+        run: npm test -w e2e
+
+      - name: Upload Playwright artifacts
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: playwright-${{ matrix.fixture }}
+          path: |
+            e2e/playwright-report
+            e2e/test-results
+            .stack/*.log
+          if-no-files-found: ignore
+
   docker:
     runs-on: blacksmith-2vcpu-ubuntu-2404
+    timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Smoke-build caddy image
         run: docker build -t c11n-caddy:ci deploy/caddy

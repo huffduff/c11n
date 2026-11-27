@@ -1,0 +1,8 @@
+# actionlint configuration.
+#
+# The workflows run on Blacksmith's hosted runners, whose label is not in
+# actionlint's built-in list of GitHub-hosted labels. Declaring it here keeps
+# `actionlint` clean without weakening the check for everything else.
+self-hosted-runner:
+  labels:
+    - blacksmith-2vcpu-ubuntu-2404

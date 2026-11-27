@@ -4,18 +4,34 @@ import { dirname, resolve } from 'node:path'
 import { describe, expect, it } from 'vitest'
 
 const bundlePath = resolve(dirname(fileURLToPath(import.meta.url)), '../dist/overlay.js')
+const inCi = !!process.env.CI
 
 describe('built bundle (dist/overlay.js)', () => {
-  // Requires `npm run build` first; skipped when dist is absent so unit runs stay green.
-  it.skipIf(!existsSync(bundlePath))('mounts the shadow-DOM host when executed in a document', () => {
-    const code = readFileSync(bundlePath, 'utf8')
-    expect(code).not.toMatch(/^\s*(import|export)\s/m)
-    new Function(code)()
+  // Requires `npm run build` first. Locally a missing dist stays a skip, so a
+  // plain `npm test` works without a build. In CI it must FAIL instead: the
+  // overlay job builds before testing on purpose, and a skip there would hide
+  // exactly the regression this smoke test exists to catch (dist built but
+  // broken, or the build step silently dropped from the workflow).
+  it.skipIf(!existsSync(bundlePath) && !inCi)(
+    'mounts the shadow-DOM host when executed in a document',
+    () => {
+      if (!existsSync(bundlePath)) {
+        throw new Error(
+          `dist/overlay.js is missing at ${bundlePath}: run 'npm run build -w packages/overlay' ` +
+            'before testing. CI must not skip this test, because it is the only check that ' +
+            'the built bundle actually mounts.',
+        )
+      }
 
-    const host = document.getElementById('c11n-root')
-    expect(host).not.toBeNull()
-    expect(host!.shadowRoot).not.toBeNull()
-    expect(host!.shadowRoot!.querySelector('style')?.textContent).toContain('.c11n-toolbar')
-    expect(host!.shadowRoot!.querySelector('.c11n-toolbar')?.textContent).toContain('c11n')
-  })
+      const code = readFileSync(bundlePath, 'utf8')
+      expect(code).not.toMatch(/^\s*(import|export)\s/m)
+      new Function(code)()
+
+      const host = document.getElementById('c11n-root')
+      expect(host).not.toBeNull()
+      expect(host!.shadowRoot).not.toBeNull()
+      expect(host!.shadowRoot!.querySelector('style')?.textContent).toContain('.c11n-toolbar')
+      expect(host!.shadowRoot!.querySelector('.c11n-toolbar')?.textContent).toContain('c11n')
+    },
+  )
 })

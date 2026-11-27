@@ -293,9 +293,11 @@ jobs:
           mkdir -p .stack-sasser
           git -C .stack-sasser init -q
           # `ssh://` rather than the scp-like `git@github.com:owner/repo.git`:
-          # both mean the same thing, but the explicit scheme cannot be parsed as
-          # a local path by anything that inspects the URL, and it needs no
-          # special-casing to be read as "ssh, path /owner/repo.git".
+          # both mean the same thing, but on this runner image the scp-like form
+          # fails before ssh is even involved ("fatal: 'git@github.com:…' does
+          # not appear to be a git repository", while the same key authenticates
+          # fine via `ssh -T`). The explicit scheme names the transport, so
+          # nothing can mistake it for a local path.
           sasser_url='ssh://git@github.com/huffduff/sasser-studios.git'
           if ! git -C .stack-sasser fetch --depth 1 --no-tags "$sasser_url" "$SASSER_REF"; then
             echo "::error::git fetch of sasser-studios@$SASSER_REF failed; retrying traced for diagnostics"
@@ -303,6 +305,10 @@ jobs:
             exit 1
           fi
           git -C .stack-sasser checkout -q --detach FETCH_HEAD
+          # The EXIT trap covers the failure path; remove the key explicitly here
+          # so this step's own log proves it is gone before anything else runs,
+          # rather than a later step having to trust the trap.
+          rm -f "$key" "$known_hosts"
           test ! -e "$key"
           echo "read-only deploy key used for one fetch and removed ($key)"
 
